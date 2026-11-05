@@ -1,0 +1,226 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedInAs(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function dateFromString(value) {
+      return timestamp.date(int(value[0:4]), int(value[5:7]), int(value[8:10]));
+    }
+
+    function validDate(value) {
+      return value is string && value.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+        dateFromString(value).year() == int(value[0:4]) &&
+        dateFromString(value).month() == int(value[5:7]) &&
+        dateFromString(value).day() == int(value[8:10]);
+    }
+
+    function padded(value) {
+      return value < 10 ? '0' + string(value) : string(value);
+    }
+
+    function dateString(value) {
+      return string(value.year()) + '-' + padded(value.month()) + '-' + padded(value.day());
+    }
+
+    function initialEffectiveDateAllowed(value) {
+      let date = dateFromString(value);
+      let todayUtc = request.time.date();
+      return date >= todayUtc - duration.value(1, 'd') && date <= todayUtc + duration.value(1, 'd');
+    }
+
+    function nextEffectiveDateAllowed(value) {
+      let date = dateFromString(value);
+      let todayUtc = request.time.date();
+      return date >= todayUtc && date <= todayUtc + duration.value(2, 'd');
+    }
+
+    function isoWeekday(date) {
+      let day = dateFromString(date).dayOfWeek();
+      return day == 1 ? 7 : day - 1;
+    }
+
+    function scheduledOn(schedule, date) {
+      return (schedule.type == 'daily') ||
+        (schedule.type == 'weekdays' && schedule.days.hasAny([isoWeekday(date)])) ||
+        (schedule.type == 'interval' && date >= schedule.startDate &&
+          ((dateFromString(date).toMillis() - dateFromString(schedule.startDate).toMillis()) / 86400000) % schedule.everyNDays == 0);
+    }
+
+    function validLogSettings(log, userId, habitId, habit) {
+      let settingsPath = /databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(string(log.settingsVersion));
+      let nextVersionPath = /databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(string(log.settingsVersion + 1));
+      let settings = get(settingsPath).data;
+      return log.settingsVersion is int && log.settingsVersion > 0 && log.settingsVersion <= habit.settingsVersion &&
+        exists(settingsPath) && settings.version == log.settingsVersion && settings.id == string(log.settingsVersion) &&
+        settings.userId == userId && settings.habitId == habitId && settings.effectiveFrom <= log.date &&
+        !settings.isArchived && scheduledOn(settings.schedule, log.date) &&
+        (log.settingsVersion == habit.settingsVersion ||
+          (exists(nextVersionPath) && get(nextVersionPath).data.effectiveFrom > log.date));
+    }
+
+    function validSchedule(value) {
+      return value is map && (
+        (value.type == 'daily' && value.keys().hasOnly(['type']) && value.keys().hasAll(['type'])) ||
+        (value.type == 'weekdays' && value.keys().hasOnly(['type', 'days']) && value.keys().hasAll(['type', 'days']) && value.days is list && value.days.size() > 0 && value.days.size() <= 7 && value.days.hasOnly([1, 2, 3, 4, 5, 6, 7])) ||
+        (value.type == 'interval' && value.keys().hasOnly(['type', 'everyNDays', 'startDate']) && value.keys().hasAll(['type', 'everyNDays', 'startDate']) && value.everyNDays is int && value.everyNDays >= 1 && value.everyNDays <= 365 && validDate(value.startDate))
+      );
+    }
+
+    function validHabitSettings(value, userId, habitId) {
+      return value.keys().hasOnly(['id', 'userId', 'habitId', 'type', 'targetPerDay', 'schedule', 'isArchived', 'effectiveFrom', 'version', 'createdAt']) &&
+        value.keys().hasAll(['id', 'userId', 'habitId', 'type', 'targetPerDay', 'schedule', 'isArchived', 'effectiveFrom', 'version', 'createdAt']) &&
+        value.id is string && value.userId == userId && value.habitId == habitId &&
+        value.type in ['boolean', 'count'] && value.targetPerDay is number && value.targetPerDay > 0 && value.targetPerDay <= 1000000 &&
+        (value.type != 'boolean' || value.targetPerDay == 1) && validSchedule(value.schedule) &&
+        value.isArchived is bool && validDate(value.effectiveFrom) && value.version is int && value.version > 0 &&
+        value.createdAt == request.time;
+    }
+
+    function validHabit(value, userId, habitId) {
+      return value.keys().hasOnly(['id', 'userId', 'name', 'description', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'isDeleting', 'settingsVersion', 'createdAt', 'updatedAt']) &&
+        value.keys().hasAll(['id', 'userId', 'name', 'description', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'settingsVersion', 'createdAt', 'updatedAt']) &&
+        value.id == habitId && value.userId == userId && value.name is string && value.name.size() > 0 && value.name.size() <= 120 &&
+        value.description is string && value.description.size() <= 2000 && value.type in ['boolean', 'count'] &&
+        value.targetPerDay is number && value.targetPerDay > 0 && value.targetPerDay <= 1000000 && (value.type != 'boolean' || value.targetPerDay == 1) &&
+        validSchedule(value.schedule) && value.isArchived is bool &&
+        (value.isArchived ? validDate(value.archivedFrom) : value.archivedFrom == null) && value.get('isDeleting', false) is bool && value.settingsVersion is int && value.settingsVersion > 0 &&
+        value.createdAt is timestamp && value.updatedAt == request.time;
+    }
+
+    function validTask(value, userId, taskId) {
+      return value.keys().hasOnly(['id', 'userId', 'title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'createdAt', 'updatedAt', 'statusVersion']) &&
+        value.keys().hasAll(['id', 'userId', 'title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'createdAt', 'updatedAt', 'statusVersion']) &&
+        value.id == taskId && value.userId == userId && value.title is string && value.title.size() > 0 && value.title.size() <= 200 &&
+        value.description is string && value.description.size() <= 4000 && value.status in ['todo', 'in_progress', 'completed'] &&
+        value.priority in ['low', 'medium', 'high'] && (value.dueDate == null || validDate(value.dueDate)) &&
+        (value.status == 'completed' ? value.completedAt is timestamp : value.completedAt == null) &&
+        value.createdAt is timestamp && value.updatedAt == request.time && value.statusVersion is int && value.statusVersion > 0;
+    }
+
+    match /users/{userId} {
+      allow get: if signedInAs(userId);
+      allow list: if false;
+      allow create: if signedInAs(userId) &&
+        request.resource.data.keys().hasOnly(['uid', 'email', 'displayName', 'timezone', 'createdAt', 'updatedAt']) &&
+        request.resource.data.keys().hasAll(['uid', 'email', 'displayName', 'timezone', 'createdAt', 'updatedAt']) &&
+          request.resource.data.uid == userId && request.resource.data.email is string && request.resource.data.email.size() <= 320 &&
+        request.resource.data.displayName is string && request.resource.data.displayName.size() <= 120 &&
+        request.resource.data.timezone is string && request.resource.data.timezone.size() > 0 && request.resource.data.timezone.size() <= 64 &&
+        request.resource.data.createdAt == request.time && request.resource.data.updatedAt == request.time;
+      allow update: if signedInAs(userId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'timezone', 'updatedAt']) &&
+        request.resource.data.uid == resource.data.uid && request.resource.data.email == resource.data.email &&
+        request.resource.data.createdAt == resource.data.createdAt && request.resource.data.updatedAt == request.time &&
+        request.resource.data.displayName is string && request.resource.data.displayName.size() <= 120 &&
+        request.resource.data.timezone is string && request.resource.data.timezone.size() > 0 && request.resource.data.timezone.size() <= 64;
+      allow delete: if false;
+
+      match /habits/{habitId} {
+        allow get, list: if signedInAs(userId);
+        allow create: if signedInAs(userId) && validHabit(request.resource.data, userId, habitId) &&
+          request.resource.data.settingsVersion == 1 && request.resource.data.isDeleting == false && request.resource.data.createdAt == request.time &&
+          getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/1).data.version == 1 &&
+          getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/1).data.type == request.resource.data.type &&
+          getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/1).data.targetPerDay == request.resource.data.targetPerDay &&
+          getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/1).data.schedule == request.resource.data.schedule;
+        allow update: if signedInAs(userId) && validHabit(request.resource.data, userId, habitId) &&
+          request.resource.data.createdAt == resource.data.createdAt && request.resource.data.userId == resource.data.userId &&
+          ((resource.data.get('isDeleting', false) == false && request.resource.data.isDeleting == true &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isDeleting', 'updatedAt']) &&
+            request.resource.data.settingsVersion == resource.data.settingsVersion) ||
+           (resource.data.get('isDeleting', false) == false && request.resource.data.get('isDeleting', false) == false &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'description', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'settingsVersion', 'updatedAt']) &&
+            request.resource.data.type == resource.data.type &&
+            request.resource.data.settingsVersion == resource.data.settingsVersion + 1 &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(request.resource.data.settingsVersion)).data.version == request.resource.data.settingsVersion &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(request.resource.data.settingsVersion)).data.type == request.resource.data.type &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(request.resource.data.settingsVersion)).data.targetPerDay == request.resource.data.targetPerDay &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(request.resource.data.settingsVersion)).data.schedule == request.resource.data.schedule &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(request.resource.data.settingsVersion)).data.isArchived == request.resource.data.isArchived));
+        allow delete: if signedInAs(userId) && resource.data.get('isDeleting', false) == true;
+
+        match /settingsHistory/{versionId} {
+          allow get, list: if signedInAs(userId);
+          allow create: if signedInAs(userId) && validHabitSettings(request.resource.data, userId, habitId) &&
+            request.resource.data.id == versionId &&
+            ((!exists(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)) && request.resource.data.version == 1 && initialEffectiveDateAllowed(request.resource.data.effectiveFrom)) ||
+             (exists(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)) &&
+              get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.get('isDeleting', false) == false &&
+              request.resource.data.version == get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.settingsVersion + 1 &&
+              request.resource.data.effectiveFrom >= get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.settingsVersion)).data.effectiveFrom &&
+              nextEffectiveDateAllowed(request.resource.data.effectiveFrom))) &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.settingsVersion == request.resource.data.version &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.updatedAt == request.time &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.type == request.resource.data.type &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.targetPerDay == request.resource.data.targetPerDay &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.schedule == request.resource.data.schedule &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.isArchived == request.resource.data.isArchived;
+          allow update: if false;
+          allow delete: if signedInAs(userId) && get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.get('isDeleting', false) == true;
+        }
+
+        match /logs/{logId} {
+          allow get, list: if signedInAs(userId);
+          allow create: if signedInAs(userId) &&
+            request.resource.data.keys().hasOnly(['id', 'userId', 'habitId', 'value', 'date', 'settingsVersion', 'completedAt']) &&
+            request.resource.data.keys().hasAll(['id', 'userId', 'habitId', 'value', 'date', 'settingsVersion', 'completedAt']) &&
+            request.resource.data.id == logId && request.resource.data.userId == userId && request.resource.data.habitId == habitId &&
+            request.resource.data.value is number && request.resource.data.value > 0 && request.resource.data.value <= 1000000 &&
+            validDate(request.resource.data.date) && request.resource.data.completedAt == request.time &&
+            exists(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)) &&
+            get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.get('isDeleting', false) == false &&
+            validLogSettings(request.resource.data, userId, habitId, get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data) &&
+            ((get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.type == 'boolean' && logId == request.resource.data.date && request.resource.data.value == 1) ||
+             (get(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)).data.type == 'count'));
+          allow update: if false;
+          allow delete: if signedInAs(userId);
+        }
+      }
+
+      match /tasks/{taskId} {
+        allow get, list: if signedInAs(userId);
+        allow create: if signedInAs(userId) && validTask(request.resource.data, userId, taskId) &&
+          request.resource.data.statusVersion == 1 && request.resource.data.createdAt == request.time &&
+          getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)/statusHistory/1).data.version == 1;
+        allow update: if signedInAs(userId) && validTask(request.resource.data, userId, taskId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'updatedAt', 'statusVersion']) &&
+          request.resource.data.createdAt == resource.data.createdAt && request.resource.data.userId == resource.data.userId &&
+          ((request.resource.data.status == resource.data.status && request.resource.data.statusVersion == resource.data.statusVersion &&
+            request.resource.data.completedAt == resource.data.completedAt) ||
+           (request.resource.data.status != resource.data.status && request.resource.data.statusVersion == resource.data.statusVersion + 1 &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)/statusHistory/$(request.resource.data.statusVersion)).data.status == request.resource.data.status &&
+            (request.resource.data.status == 'completed' ? request.resource.data.completedAt == request.time : request.resource.data.completedAt == null)));
+        allow delete: if signedInAs(userId);
+
+        match /statusHistory/{eventId} {
+          allow get, list: if signedInAs(userId);
+          allow create: if signedInAs(userId) &&
+            request.resource.data.keys().hasOnly(['id', 'userId', 'taskId', 'status', 'date', 'version', 'changedAt']) &&
+            request.resource.data.keys().hasAll(['id', 'userId', 'taskId', 'status', 'date', 'version', 'changedAt']) &&
+            request.resource.data.id == eventId && request.resource.data.userId == userId && request.resource.data.taskId == taskId &&
+            request.resource.data.status in ['todo', 'in_progress', 'completed'] && validDate(request.resource.data.date) &&
+            request.resource.data.version is int && request.resource.data.version > 0 && request.resource.data.changedAt == request.time &&
+            ((!exists(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)) && request.resource.data.version == 1) ||
+             (exists(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)) && request.resource.data.version == get(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.statusVersion + 1)) &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.statusVersion == request.resource.data.version &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.updatedAt == request.time &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.status == request.resource.data.status;
+          allow update: if false;
+          allow delete: if signedInAs(userId);
+        }
+      }
+    }
+
+    match /{path=**}/logs/{logId} {
+      allow get, list: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+    match /{path=**}/settingsHistory/{versionId} {
+      allow get, list: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+    match /{path=**}/statusHistory/{eventId} {
+      allow get, list: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+  }
+}
