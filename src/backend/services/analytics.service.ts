@@ -3,7 +3,8 @@ import { readTaskStatusHistory } from '../repositories/task.repository'
 import { readTasks } from '../repositories/task.repository'
 import { calculateHabitAnalytics, calculateTaskAnalytics, rankHabits } from '../engines/analytics.engine'
 import { calculateStreakSummary, getHabitDay } from '../engines/streak.engine'
-import { startOfIsoWeek } from '../utils/dates'
+import { assertLocalDate, startOfIsoWeek } from '../utils/dates'
+import { BackendError } from '../utils/errors'
 import { validateNonNegativeRange } from '../utils/validation'
 import { currentUserContext, runBackendOperation } from './shared'
 import type { DashboardSummary, HabitAnalytics, LocalDate, TaskAnalytics } from '../types'
@@ -11,9 +12,10 @@ import type { DashboardSummary, HabitAnalytics, LocalDate, TaskAnalytics } from 
 export function getHabitAnalytics(startDate: LocalDate, endDate: LocalDate): Promise<HabitAnalytics[]> {
   return runBackendOperation(async () => {
     validateNonNegativeRange(startDate, endDate)
-    const { uid } = await currentUserContext()
+    const { uid, today } = await currentUserContext()
+    if (endDate > today) throw new BackendError('validation', 'Habit analytics cannot include future dates.')
     const [habits, history, logs] = await Promise.all([
-      readHabits(uid), readHabitSettingsHistory(uid, endDate), readLogsByRange(uid, startDate, endDate),
+      readHabits(uid), readHabitSettingsHistory(uid), readLogsByRange(uid, startDate, endDate),
     ])
     return calculateHabitAnalytics(habits, history, logs, startDate, endDate)
   })
@@ -23,6 +25,7 @@ export function getWeeklyHabitAnalytics(date?: LocalDate): Promise<HabitAnalytic
   return runBackendOperation(async () => {
     const { today } = await currentUserContext()
     const selected = date ?? today
+    assertLocalDate(selected)
     return getHabitAnalytics(startOfIsoWeek(selected), selected)
   })
 }
@@ -31,6 +34,7 @@ export function getMonthlyHabitAnalytics(date?: LocalDate): Promise<HabitAnalyti
   return runBackendOperation(async () => {
     const { today } = await currentUserContext()
     const selected = date ?? today
+    assertLocalDate(selected)
     const [year, month] = selected.split('-').map(Number)
     return getHabitAnalytics(`${year}-${String(month).padStart(2, '0')}-01` as LocalDate, selected)
   })
@@ -40,10 +44,14 @@ export function getTaskAnalytics(startDate: LocalDate, endDate: LocalDate, today
   return runBackendOperation(async () => {
     validateNonNegativeRange(startDate, endDate)
     const context = await currentUserContext()
-    const [tasks, events] = await Promise.all([
+    if (endDate > context.today) throw new BackendError('validation', 'Task analytics cannot include future dates.')
+    const [allTasks, events] = await Promise.all([
       readTasks(context.uid), readTaskStatusHistory(context.uid, startDate, endDate),
     ])
-    return calculateTaskAnalytics(tasks, events, today ?? context.today, startDate, endDate)
+    const tasks = allTasks.filter((task) => !task.isDeleting)
+    const taskIds = new Set(tasks.map((task) => task.id))
+    const visibleEvents = events.filter((event) => taskIds.has(event.taskId))
+    return calculateTaskAnalytics(tasks, visibleEvents, today ?? context.today, startDate, endDate)
   })
 }
 
@@ -51,8 +59,10 @@ export function getDashboardSummary(date?: LocalDate): Promise<DashboardSummary>
   return runBackendOperation(async () => {
     const { uid, today: currentDate } = await currentUserContext()
     const targetDate = date ?? currentDate
+    assertLocalDate(targetDate)
+    if (targetDate > currentDate) throw new BackendError('validation', 'Dashboard date cannot be in the future.')
     const [habits, history, tasks] = await Promise.all([
-      readHabits(uid), readHabitSettingsHistory(uid, targetDate), readTasks(uid),
+      readHabits(uid), readHabitSettingsHistory(uid), readTasks(uid),
     ])
     const firstDate = history.map((item) => item.effectiveFrom).sort()[0]
     const logs = firstDate && firstDate <= targetDate ? await readLogsByRange(uid, firstDate, targetDate) : []
@@ -69,7 +79,7 @@ export function getDashboardSummary(date?: LocalDate): Promise<DashboardSummary>
       return [{
         habitId: habit.id,
         name: habit.name,
-        streak: calculateStreakSummary(habit, history, logs, targetDate).currentStreak,
+        streak: calculateStreakSummary(habit, history, logs, targetDate, currentDate).currentStreak,
       }]
     })
     const tasksDue = tasks.filter((task) => task.dueDate === targetDate)

@@ -25,15 +25,34 @@ function logsFor(dates: string[]): HabitLog[] {
 
 describe('streak engine', () => {
   it('does not break a streak on an unscheduled weekend', () => {
-    const summary = calculateStreakSummary(habit, settings, logsFor(['2026-11-06', '2026-11-09']), '2026-11-10')
+    const summary = calculateStreakSummary(habit, settings, logsFor(['2026-11-06', '2026-11-09']), '2026-11-10', '2026-11-10')
     expect(summary.currentStreak).toBe(2)
     expect(summary.longestStreak).toBe(2)
   })
 
-  it('keeps an incomplete current day pending but breaks on a missed due day', () => {
+  it('keeps an incomplete current day pending but counts a historical miss as a break', () => {
     const completePriorDays = logsFor(['2026-11-02', '2026-11-03', '2026-11-04'])
-    expect(calculateStreakSummary(habit, settings, completePriorDays, '2026-11-05').currentStreak).toBe(3)
-    expect(calculateStreakSummary(habit, settings, logsFor(['2026-11-02']), '2026-11-04').currentStreak).toBe(0)
+    expect(calculateStreakSummary(habit, settings, completePriorDays, '2026-11-05', '2026-11-05').currentStreak).toBe(3)
+    expect(calculateStreakSummary(habit, settings, logsFor(['2026-11-02']), '2026-11-04', '2026-11-05').currentStreak).toBe(0)
+  })
+
+  it('breaks a historical streak on an incomplete scheduled date and preserves the earlier maximum', () => {
+    const summary = calculateStreakSummary(habit, settings, logsFor(['2026-11-02', '2026-11-03']), '2026-11-05', '2026-11-06')
+    expect(summary).toMatchObject({ currentStreak: 0, longestStreak: 2, totalCompletedDays: 2 })
+  })
+
+  it('rejects an as-of date in the future', () => {
+    expect(() => calculateStreakSummary(habit, settings, [], '2026-11-06', '2026-11-05')).toThrow(/future/)
+  })
+
+  it('handles interval schedules without counting a historical miss as pending', () => {
+    const intervalHabit: Habit = { ...habit, schedule: { type: 'interval', everyNDays: 2, startDate: '2026-11-02' } }
+    const intervalSettings: HabitSettings[] = [{ ...settings[0], schedule: intervalHabit.schedule }]
+    const logs = logsFor(['2026-11-02', '2026-11-04'])
+    const historical = calculateStreakSummary(intervalHabit, intervalSettings, logs, '2026-11-06', '2026-11-07')
+    const current = calculateStreakSummary(intervalHabit, intervalSettings, logs, '2026-11-06', '2026-11-06')
+    expect(historical.currentStreak).toBe(0)
+    expect(current.currentStreak).toBe(2)
   })
 
   it('uses the settings version effective on each historical date', () => {

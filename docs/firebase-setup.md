@@ -11,7 +11,7 @@ The existing `.gitignore` excludes `.env` and `.env.*` while allowing `.env.exam
 
 ## Local emulators
 
-Install JDK 21 or later for the current Firebase CLI Firestore emulator. Copy the example env file to `.env.local`, set `VITE_USE_FIREBASE_EMULATORS=true`, and keep the default emulator addresses unless they conflict locally. Do not use emulator mode against production data.
+Install JDK 21 or later for the current Firebase CLI Firestore emulator. If multiple Java installations exist on Windows, verify `java -version` reports JDK 21 and put that JDK's `bin` directory before older Java shims in the current terminal's `PATH`. Copy the example env file to `.env.local`, set `VITE_USE_FIREBASE_EMULATORS=true`, and keep the default emulator addresses unless they conflict locally. Do not use emulator mode against production data.
 
 Run Rules tests with:
 

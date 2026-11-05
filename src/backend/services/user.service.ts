@@ -4,6 +4,7 @@ import { createProfileIfMissing, readUserProfile, updateUserProfile } from '../r
 import { currentUserId, runBackendOperation } from './shared'
 import { BackendError } from '../utils/errors'
 import { validateProfileInput } from '../utils/validation'
+import { supportedTimezoneOrUtc } from '../utils/schedules'
 import type { UserProfile } from '../types'
 
 export function getUserProfile(): Promise<UserProfile> {
@@ -13,7 +14,7 @@ export function getUserProfile(): Promise<UserProfile> {
     if (!user) throw new BackendError('unauthenticated')
     const existing = await readUserProfile(user.uid)
     if (existing) return existing
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    const timezone = supportedTimezoneOrUtc(Intl.DateTimeFormat().resolvedOptions().timeZone)
     return createProfileIfMissing(user, timezone)
   })
 }
@@ -25,7 +26,7 @@ export function updateUserProfileFields(input: { displayName?: string; timezone?
     const uid = currentUserId()
     const user = getFirebaseServices().auth.currentUser
     if (!user) throw new BackendError('unauthenticated')
-    const initialTimezone = input.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC'
+    const initialTimezone = input.timezone ?? supportedTimezoneOrUtc(Intl.DateTimeFormat().resolvedOptions().timeZone)
     await createProfileIfMissing(user, initialTimezone)
     const fields: Partial<Pick<UserProfile, 'displayName' | 'timezone'>> = {}
     if (input.displayName !== undefined) fields.displayName = input.displayName.trim()

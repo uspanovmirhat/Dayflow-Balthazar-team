@@ -10,7 +10,7 @@ import {
 import { getFirebaseServices } from '../config/firebase'
 import { createProfileIfMissing } from '../repositories/user.repository'
 import { runBackendOperation } from './shared'
-import { assertTimeZone } from '../utils/dates'
+import { isValidTimezone, supportedTimezoneOrUtc } from '../utils/schedules'
 import { BackendError } from '../utils/errors'
 import { requireString } from '../utils/validation'
 
@@ -34,8 +34,8 @@ export function register(input: RegisterInput): Promise<User> {
     const email = normalizeEmail(input.email)
     const displayName = requireString(input.displayName, 'displayName', 120)
     if (typeof input.password !== 'string' || input.password.length < 8) throw new BackendError('validation', 'password must contain at least 8 characters.')
-    const timezone = input.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC'
-    assertTimeZone(timezone)
+    const timezone = input.timezone ?? supportedTimezoneOrUtc(Intl.DateTimeFormat().resolvedOptions().timeZone)
+    if (!isValidTimezone(timezone)) throw new BackendError('validation', 'timezone is not in the supported timezone list.')
     const { auth } = getFirebaseServices()
     const credential = await createUserWithEmailAndPassword(auth, email, input.password)
     await updateAuthProfile(credential.user, { displayName })
@@ -48,7 +48,7 @@ export function login(emailValue: string, password: string): Promise<User> {
   return runBackendOperation(async () => {
     if (typeof password !== 'string' || password.length === 0) throw new BackendError('validation', 'password is required.')
     const credential = await signInWithEmailAndPassword(getFirebaseServices().auth, normalizeEmail(emailValue), password)
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    const timezone = supportedTimezoneOrUtc(Intl.DateTimeFormat().resolvedOptions().timeZone)
     await createProfileIfMissing(credential.user, timezone)
     return credential.user
   })

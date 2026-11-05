@@ -1,10 +1,10 @@
 import {
   collection,
   collectionGroup,
-  deleteDoc,
   doc,
   getDoc,
   getDocs,
+  limit,
   query,
   runTransaction,
   serverTimestamp,
@@ -35,7 +35,7 @@ export async function createTaskRecord(uid: string, input: {
       status: input.status, priority: input.priority, dueDate: input.dueDate,
       completedAt: input.status === 'completed' ? serverTimestamp() : null,
       createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
-      statusVersion: 1,
+      statusVersion: 1, isDeleting: false,
     })
     const event = doc(collection(ref, 'statusHistory'), '1')
     transaction.set(event, {
@@ -55,17 +55,17 @@ export async function readTask(uid: string, taskId: string): Promise<Task | null
 
 export async function readTasks(uid: string): Promise<Task[]> {
   const snapshot = await getDocs(tasksRef(uid))
-  return snapshot.docs.map((item) => parseTask(item.data(), uid, item.id))
+  return snapshot.docs.map((item) => parseTask(item.data(), uid, item.id)).filter((task) => !task.isDeleting)
 }
 
 export async function readTasksByStatus(uid: string, status: TaskStatus): Promise<Task[]> {
   const snapshot = await getDocs(query(tasksRef(uid), where('status', '==', status)))
-  return snapshot.docs.map((item) => parseTask(item.data(), uid, item.id))
+  return snapshot.docs.map((item) => parseTask(item.data(), uid, item.id)).filter((task) => !task.isDeleting)
 }
 
 export async function readTasksByDateRange(uid: string, startDate: LocalDate, endDate: LocalDate): Promise<Task[]> {
   const snapshot = await getDocs(query(tasksRef(uid), where('dueDate', '>=', startDate), where('dueDate', '<=', endDate)))
-  return snapshot.docs.map((item) => parseTask(item.data(), uid, item.id))
+  return snapshot.docs.map((item) => parseTask(item.data(), uid, item.id)).filter((task) => !task.isDeleting)
 }
 
 export async function readTaskStatusHistory(uid: string, startDate?: LocalDate, endDate?: LocalDate): Promise<TaskStatusEvent[]> {
@@ -89,6 +89,7 @@ export async function updateTaskRecord(uid: string, taskId: string, patch: {
     const snapshot = await transaction.get(ref)
     if (!snapshot.exists()) throw new BackendError('not-found')
     const current = snapshot.data()
+    if (current.isDeleting === true) throw new BackendError('failed-precondition', 'A task being deleted cannot be updated.')
     const nextStatus = patch.status ?? current.status as TaskStatus
     const statusChanged = patch.status !== undefined && patch.status !== current.status
     const nextVersion = Number(current.statusVersion ?? 1) + (statusChanged ? 1 : 0)
@@ -121,11 +122,26 @@ export async function updateTaskRecord(uid: string, taskId: string, patch: {
 export async function deleteTaskRecord(uid: string, taskId: string): Promise<void> {
   const db = getFirebaseServices().db
   const ref = taskRef(uid, taskId)
-  const history = await getDocs(collection(ref, 'statusHistory'))
-  for (let offset = 0; offset < history.docs.length; offset += 400) {
+  await runTransaction(db, async (transaction) => {
+    const current = await transaction.get(ref)
+    if (!current.exists()) throw new BackendError('not-found', 'Task was not found.')
+    if (current.data().isDeleting !== true) {
+      transaction.update(ref, { isDeleting: true, updatedAt: serverTimestamp() })
+    }
+  })
+
+  const events = collection(ref, 'statusHistory')
+  while (true) {
+    const history = await getDocs(query(events, limit(400)))
+    if (history.empty) break
     const batch = writeBatch(db)
-    history.docs.slice(offset, offset + 400).forEach((item) => batch.delete(item.ref))
+    history.docs.forEach((item) => batch.delete(item.ref))
     await batch.commit()
   }
-  await deleteDoc(ref)
+  await runTransaction(db, async (transaction) => {
+    const current = await transaction.get(ref)
+    if (!current.exists()) return
+    if (current.data().isDeleting !== true) throw new BackendError('failed-precondition', 'Task deletion lock was lost during cleanup.')
+    transaction.delete(ref)
+  })
 }

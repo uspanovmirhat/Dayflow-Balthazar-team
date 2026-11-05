@@ -12,7 +12,7 @@ export function getCalendarEvents(startDate: LocalDate, endDate: LocalDate): Pro
     const { uid } = await currentUserContext()
     const [habits, history, logs, tasks] = await Promise.all([
       readHabits(uid),
-      readHabitSettingsHistory(uid, endDate),
+      readHabitSettingsHistory(uid),
       readLogsByRange(uid, startDate, endDate),
       readTasksByDateRange(uid, startDate, endDate),
     ])

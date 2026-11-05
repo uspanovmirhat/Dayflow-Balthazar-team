@@ -62,6 +62,12 @@ describe('authentication service', () => {
     expect(mocks.createUser).not.toHaveBeenCalled()
   })
 
+  it('rejects a valid IANA timezone that Rules do not support', async () => {
+    await expect(register({ email: 'person@example.com', password: 'long-password', displayName: 'Person', timezone: 'America/Detroit' }))
+      .rejects.toMatchObject({ code: 'validation' })
+    expect(mocks.createUser).not.toHaveBeenCalled()
+  })
+
   it('forwards password reset and auth-state subscriptions', async () => {
     await requestPasswordReset('Person@example.com')
     expect(mocks.resetPassword).toHaveBeenCalledWith({ currentUser: expect.anything() }, 'person@example.com')

@@ -1,6 +1,6 @@
 import { BackendError } from './errors'
-import { assertLocalDate, assertTimeZone } from './dates'
-import { validateSchedule } from './schedules'
+import { assertLocalDate } from './dates'
+import { isValidTimezone, validateSchedule } from './schedules'
 import type { HabitType, TaskPriority, TaskStatus } from '../types'
 
 export function requireString(value: unknown, field: string, maxLength: number, allowEmpty = false): string {
@@ -57,8 +57,7 @@ export function validateProfileInput(input: { displayName?: unknown; timezone?: 
   if (!input || typeof input !== 'object') throw new BackendError('validation', 'Profile input must be an object.')
   if (input.displayName !== undefined) requireString(input.displayName, 'displayName', 120, true)
   if (input.timezone !== undefined) {
-    if (typeof input.timezone !== 'string') throw new BackendError('validation', 'timezone must be a string.')
-    assertTimeZone(input.timezone)
+    if (!isValidTimezone(input.timezone)) throw new BackendError('validation', 'timezone is not in the supported timezone list.')
   }
 }
 

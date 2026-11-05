@@ -12,6 +12,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  deleteDoc,
   query,
   serverTimestamp,
   setDoc,
@@ -25,6 +26,8 @@ const mocks = vi.hoisted(() => ({ getFirebaseServices: vi.fn() }))
 vi.mock('../src/backend/config/firebase', () => ({ getFirebaseServices: mocks.getFirebaseServices }))
 
 import { createHabitLogRecord, deleteHabitRecord, readHabit } from '../src/backend/repositories/habit.repository'
+import { deleteTaskRecord, updateTaskRecord } from '../src/backend/repositories/task.repository'
+import { readUserProfile } from '../src/backend/repositories/user.repository'
 
 let testEnvironment: RulesTestEnvironment
 
@@ -98,6 +101,23 @@ async function seedOwnHabit() {
   })
 }
 
+async function seedOwnTask() {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    const db = context.firestore()
+    await setDoc(doc(db, 'users/u1'), {
+      uid: 'u1', email: 'u1@example.com', displayName: 'User', timezone: 'UTC',
+      createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    })
+    await setDoc(doc(db, 'users/u1/tasks/t1'), {
+      id: 't1', userId: 'u1', title: 'Task', description: '', status: 'todo', priority: 'medium',
+      dueDate: null, completedAt: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), statusVersion: 1, isDeleting: false,
+    })
+    await setDoc(doc(db, 'users/u1/tasks/t1/statusHistory/1'), {
+      id: '1', userId: 'u1', taskId: 't1', status: 'todo', date: '2026-11-05', version: 1, changedAt: serverTimestamp(),
+    })
+  })
+}
+
 describe('Firestore security rules', () => {
   it('limits profile and habit reads to the signed-in owner', async () => {
     await seedOwnHabit()
@@ -162,6 +182,71 @@ describe('Firestore security rules', () => {
     await assertFails(updateDoc(doc(db, 'users/u1'), { uid: 'u2', updatedAt: serverTimestamp() }))
   })
 
+  it('rejects unsupported profile timezones and repairs a legacy invalid timezone', async () => {
+    await seedOwnHabit()
+    const owner = testEnvironment.authenticatedContext('u1').firestore()
+    await assertFails(updateDoc(doc(owner, 'users/u1'), { timezone: 'Mars/Olympus', updatedAt: serverTimestamp() }))
+    await testEnvironment.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), 'users/u1'), { timezone: 'Legacy/Invalid' })
+    })
+    mocks.getFirebaseServices.mockReturnValue({ db: owner })
+    const profile = await readUserProfile('u1')
+    expect(profile?.timezone).toBe('UTC')
+    expect((await getDoc(doc(owner, 'users/u1'))).data()?.timezone).toBe('UTC')
+  })
+
+  it('does not allow independent status-history deletion or writes while a task is deleting', async () => {
+    await seedOwnTask()
+    const db = testEnvironment.authenticatedContext('u1').firestore()
+    await assertFails(deleteDoc(doc(db, 'users/u1/tasks/t1/statusHistory/1')))
+    await updateDoc(doc(db, 'users/u1/tasks/t1'), { isDeleting: true, updatedAt: serverTimestamp() })
+    await assertFails(updateDoc(doc(db, 'users/u1/tasks/t1'), {
+      status: 'completed', statusVersion: 2, completedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    }))
+    await assertFails(setDoc(doc(db, 'users/u1/tasks/t1/statusHistory/2'), {
+      id: '2', userId: 'u1', taskId: 't1', status: 'completed', date: '2026-11-05', version: 2, changedAt: serverTimestamp(),
+    }))
+  })
+
+  it('serializes task deletion against concurrent status changes and removes all status history', async () => {
+    await seedOwnTask()
+    const db = testEnvironment.authenticatedContext('u1').firestore()
+    mocks.getFirebaseServices.mockReturnValue({ db })
+    const outcomes = await Promise.allSettled([
+      updateTaskRecord('u1', 't1', { status: 'completed', localDate: '2026-11-05' }),
+      deleteTaskRecord('u1', 't1'),
+    ])
+    expect(outcomes[1].status).toBe('fulfilled')
+    expect((await getDoc(doc(db, 'users/u1/tasks/t1'))).exists()).toBe(false)
+    expect((await getDocs(collection(db, 'users/u1/tasks/t1/statusHistory'))).empty).toBe(true)
+  })
+
+  it('deletes large task histories in bounded batches below Firestore write limits', async () => {
+    await testEnvironment.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore()
+      await setDoc(doc(db, 'users/u1'), {
+        uid: 'u1', email: 'u1@example.com', displayName: 'User', timezone: 'UTC',
+        createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+      })
+      await setDoc(doc(db, 'users/u1/tasks/tlarge'), {
+        id: 'tlarge', userId: 'u1', title: 'Large history', description: '', status: 'todo', priority: 'medium',
+        dueDate: null, completedAt: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), statusVersion: 401, isDeleting: false,
+      })
+      const batch = writeBatch(db)
+      for (let version = 1; version <= 401; version += 1) {
+        batch.set(doc(db, `users/u1/tasks/tlarge/statusHistory/${version}`), {
+          id: String(version), userId: 'u1', taskId: 'tlarge', status: 'todo', date: '2026-11-05', version, changedAt: serverTimestamp(),
+        })
+      }
+      await batch.commit()
+    })
+    const db = testEnvironment.authenticatedContext('u1').firestore()
+    mocks.getFirebaseServices.mockReturnValue({ db })
+    await deleteTaskRecord('u1', 'tlarge')
+    expect((await getDoc(doc(db, 'users/u1/tasks/tlarge'))).exists()).toBe(false)
+    expect((await getDocs(collection(db, 'users/u1/tasks/tlarge/statusHistory'))).empty).toBe(true)
+  })
+
   it('rejects logs for unscheduled, archived, or impossible calendar dates', async () => {
     await seedOwnHabit()
     const db = testEnvironment.authenticatedContext('u1').firestore()
@@ -191,6 +276,21 @@ describe('Firestore security rules', () => {
     await assertFails(setDoc(doc(db, `users/u1/habits/h1/logs/${effectiveFrom}`), {
       id: effectiveFrom, userId: 'u1', habitId: 'h1', value: 1, date: effectiveFrom, settingsVersion: 2, completedAt: serverTimestamp(),
     }))
+  })
+
+  it('rejects direct writes with extra schedule fields or duplicate weekdays', async () => {
+    await seedOwnHabit()
+    const db = testEnvironment.authenticatedContext('u1').firestore()
+    const effectiveFrom = utcDateAfter(1)
+    for (const schedule of [{ type: 'daily', extra: true }, { type: 'weekdays', days: [1, 1] }]) {
+      const batch = writeBatch(db)
+      batch.update(doc(db, 'users/u1/habits/h1'), { schedule, settingsVersion: 2, updatedAt: serverTimestamp() })
+      batch.set(doc(db, 'users/u1/habits/h1/settingsHistory/2'), {
+        id: '2', userId: 'u1', habitId: 'h1', type: 'boolean', targetPerDay: 1,
+        schedule, isArchived: false, effectiveFrom, version: 2, createdAt: serverTimestamp(),
+      })
+      await assertFails(batch.commit())
+    }
   })
 
   it('rejects backdated settings versions and permits only bounded future effective dates', async () => {
@@ -261,5 +361,18 @@ describe('Firestore security rules', () => {
       id: '2', userId: 'u1', taskId: 't1', status: 'completed', date: '2026-11-05', version: 2, changedAt: serverTimestamp(),
     })
     await assertSucceeds(batch.commit())
+  })
+
+  it('rejects direct creation of task history with a forged historical date', async () => {
+    const db = testEnvironment.authenticatedContext('u1').firestore()
+    const batch = writeBatch(db)
+    batch.set(doc(db, 'users/u1/tasks/told'), {
+      id: 'told', userId: 'u1', title: 'Task', description: '', status: 'todo', priority: 'medium',
+      dueDate: null, completedAt: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), statusVersion: 1, isDeleting: false,
+    })
+    batch.set(doc(db, 'users/u1/tasks/told/statusHistory/1'), {
+      id: '1', userId: 'u1', taskId: 'told', status: 'todo', date: '2000-01-01', version: 1, changedAt: serverTimestamp(),
+    })
+    await assertFails(batch.commit())
   })
 })

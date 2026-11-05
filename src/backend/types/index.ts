@@ -71,6 +71,7 @@ export interface Task {
   createdAt: Timestamp
   updatedAt: Timestamp
   statusVersion: number
+  isDeleting?: boolean
 }
 
 export interface TaskStatusEvent {

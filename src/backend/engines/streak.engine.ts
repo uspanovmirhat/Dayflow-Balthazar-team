@@ -1,6 +1,7 @@
-import { enumerateDates } from '../utils/dates'
+import { enumerateDates, localDateInTimeZone } from '../utils/dates'
 import { BackendError } from '../utils/errors'
 import { isScheduledDate } from '../utils/schedules'
+import { assertLocalDate } from '../utils/dates'
 import type { Habit, HabitDayResult, HabitLog, HabitSettings, LocalDate, StreakSummary } from '../types'
 
 export function settingsForDate(habit: Habit, history: HabitSettings[], date: LocalDate): HabitSettings {
@@ -67,7 +68,16 @@ export function getScheduledHabitDays(habit: Habit, history: HabitSettings[], lo
   })
 }
 
-export function calculateStreakSummary(habit: Habit, history: HabitSettings[], logs: HabitLog[], asOfDate: LocalDate): StreakSummary {
+export function calculateStreakSummary(
+  habit: Habit,
+  history: HabitSettings[],
+  logs: HabitLog[],
+  asOfDate: LocalDate,
+  currentDate: LocalDate = localDateInTimeZone(new Date(), Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'),
+): StreakSummary {
+  assertLocalDate(asOfDate, 'asOfDate')
+  assertLocalDate(currentDate, 'currentDate')
+  if (asOfDate > currentDate) throw new BackendError('validation', 'asOfDate cannot be in the future.')
   const firstDate = history
     .filter((item) => item.habitId === habit.id)
     .map((item) => item.effectiveFrom)
@@ -86,7 +96,7 @@ export function calculateStreakSummary(habit: Habit, history: HabitSettings[], l
   }
 
   let lastDueIndex = dueDays.length - 1
-  if (lastDueIndex >= 0 && dueDays[lastDueIndex].date === asOfDate && !dueDays[lastDueIndex].completed) lastDueIndex -= 1
+  if (lastDueIndex >= 0 && dueDays[lastDueIndex].date === currentDate && !dueDays[lastDueIndex].completed) lastDueIndex -= 1
   let currentStreak = 0
   for (let index = lastDueIndex; index >= 0 && dueDays[index].completed; index -= 1) currentStreak += 1
 

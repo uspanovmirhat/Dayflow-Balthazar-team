@@ -43,12 +43,12 @@ When a habit is created, its first settings version takes effect on the current 
 
 - Boolean log IDs equal the local date. A Firestore transaction reads the parent habit and effective settings before creating a log and checks for an existing document. Security Rules independently validate the referenced settings version, its schedule/archive state, and deny overwriting an existing log.
 - Count logs use unique document IDs. Each positive increment is a separate immutable event, so concurrent additions do not overwrite an aggregate counter. Daily value is the sum of logs; completion means the sum is at least the target effective that date.
-- Habit deletion first sets `isDeleting` in a transaction. Log transactions read the parent, and Rules reject new logs once this flag is set. The service then removes logs/history in batches and deletes the parent. If cleanup fails, retrying deletion resumes from the locked parent without reopening writes.
+- Habit and task deletion first set `isDeleting` in a transaction. Log/task transactions read the parent, and Rules reject new writes once this flag is set. The service then removes child records in batches of at most 400 and deletes the parent. If cleanup fails, retrying deletion resumes from the locked parent without reopening writes.
 - Removing a log deletes that source event. The next analytics/calendar read reflects the removal without repairing stored aggregates.
 
 ## Streaks and analytics
 
-Streaks count consecutive *scheduled* dates. An unscheduled weekday is skipped. A missed scheduled date breaks the run. An incomplete current local day remains pending for current-streak purposes until its date passes. Longest streak and total completed days use the complete available history. Count habits complete a day when the sum reaches that day’s historical target.
+Streaks count consecutive *scheduled* dates. An unscheduled weekday is skipped. A missed scheduled date breaks the run. An incomplete current local day remains pending for current-streak purposes until its date passes; an incomplete historical date breaks the run. Services pass the profile-local current date explicitly. Longest streak and total completed days use the complete available history. Count habits complete a day when the sum reaches that day’s historical target.
 
 Analytics use logs, settings history, tasks, and task status events. Week ranges start Monday; the weekly helper reports Monday through the selected local date. The monthly helper reports the first of the selected month through that date. Task totals/status/overdue counts describe the current task set; `completedOverTime` uses status-transition history and can count a task again if it is reopened and completed again.
 
@@ -60,9 +60,9 @@ Calendar reads habits and settings history, then issues collection-group range q
 
 ## Security boundary and known limits
 
-Rules limit access to the caller’s UID, validate allowed fields/types, prevent boolean duplicate document creation, validate log schedule/archive state, require task status history to accompany a status transition, and permit habit history deletion only after the deletion lock is set. Logs and history records are immutable after creation, though owners may delete logs.
+Rules limit access to the caller’s UID, validate allowed fields/types, prevent boolean duplicate document creation, validate log schedule/archive state, require task status history to accompany a status transition, and permit child history deletion only after the corresponding deletion lock is set. Task status history cannot be independently changed or deleted. Logs are immutable after creation, though owners may delete logs.
 
-Rules validate actual calendar dates, evaluate schedule recurrence from the local-date string, and check the log's exact effective settings version. They cannot resolve the profile's IANA timezone from `request.time`; for future-date checks the service uses the profile timezone, while Rules restrict a new settings effective date to a small UTC-relative window and require it to be monotonic. A client can still choose the UTC date at a moment when that is yesterday in its local timezone. Fully authoritative timezone semantics would require a trusted server. The MVP does not use Cloud Functions or a paid server.
+Rules validate actual calendar dates, evaluate schedule recurrence from the local-date string, and check the log's exact effective settings version. Rules cannot resolve arbitrary IANA timezone IDs, so profile writes use the explicit allowlist in `src/backend/utils/schedules.ts` and `firestore.rules`. A malformed legacy timezone is repaired to UTC on profile read. Rules still cannot derive local today from `request.time`; they restrict effective dates to a bounded UTC-relative window and require monotonic history. Fully authoritative timezone semantics would require a trusted server. The MVP does not use Cloud Functions or a paid server.
 
 ### Dependency security note (checked 2026-11-05)
 

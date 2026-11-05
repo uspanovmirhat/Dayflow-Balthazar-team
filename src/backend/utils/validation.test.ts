@@ -14,8 +14,9 @@ describe('backend validation', () => {
     expect(() => validateTaskInput({ title: 'Task', priority: 'urgent' })).toThrow(BackendError)
   })
 
-  it('requires a valid IANA timezone', () => {
+  it('requires a timezone in the Rules-supported IANA allowlist', () => {
     expect(() => validateProfileInput({ timezone: 'Mars/Olympus' })).toThrow(BackendError)
     expect(() => validateProfileInput({ timezone: 'Asia/Qyzylorda' })).not.toThrow()
+    expect(() => validateProfileInput({ timezone: 'America/Detroit' })).toThrow(BackendError)
   })
 })

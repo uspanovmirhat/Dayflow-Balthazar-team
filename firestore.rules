@@ -5,6 +5,19 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == userId;
     }
 
+    function validTimezone(value) {
+      return value in [
+        'UTC', 'Etc/UTC',
+        'America/Los_Angeles', 'America/Denver', 'America/Chicago', 'America/New_York',
+        'America/Toronto', 'America/Vancouver', 'America/Sao_Paulo',
+        'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
+        'Africa/Johannesburg',
+        'Asia/Almaty', 'Asia/Aqtau', 'Asia/Aqtobe', 'Asia/Atyrau', 'Asia/Oral', 'Asia/Qostanay', 'Asia/Qyzylorda',
+        'Asia/Dubai', 'Asia/Kolkata', 'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul',
+        'Australia/Sydney', 'Pacific/Auckland'
+      ];
+    }
+
     function dateFromString(value) {
       return timestamp.date(int(value[0:4]), int(value[5:7]), int(value[8:10]));
     }
@@ -63,7 +76,7 @@ service cloud.firestore {
     function validSchedule(value) {
       return value is map && (
         (value.type == 'daily' && value.keys().hasOnly(['type']) && value.keys().hasAll(['type'])) ||
-        (value.type == 'weekdays' && value.keys().hasOnly(['type', 'days']) && value.keys().hasAll(['type', 'days']) && value.days is list && value.days.size() > 0 && value.days.size() <= 7 && value.days.hasOnly([1, 2, 3, 4, 5, 6, 7])) ||
+        (value.type == 'weekdays' && value.keys().hasOnly(['type', 'days']) && value.keys().hasAll(['type', 'days']) && value.days is list && value.days.size() > 0 && value.days.size() <= 7 && value.days.hasOnly([1, 2, 3, 4, 5, 6, 7]) && value.days.toSet().size() == value.days.size()) ||
         (value.type == 'interval' && value.keys().hasOnly(['type', 'everyNDays', 'startDate']) && value.keys().hasAll(['type', 'everyNDays', 'startDate']) && value.everyNDays is int && value.everyNDays >= 1 && value.everyNDays <= 365 && validDate(value.startDate))
       );
     }
@@ -90,13 +103,31 @@ service cloud.firestore {
     }
 
     function validTask(value, userId, taskId) {
-      return value.keys().hasOnly(['id', 'userId', 'title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'createdAt', 'updatedAt', 'statusVersion']) &&
+      return value.keys().hasOnly(['id', 'userId', 'title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'createdAt', 'updatedAt', 'statusVersion', 'isDeleting']) &&
         value.keys().hasAll(['id', 'userId', 'title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'createdAt', 'updatedAt', 'statusVersion']) &&
         value.id == taskId && value.userId == userId && value.title is string && value.title.size() > 0 && value.title.size() <= 200 &&
         value.description is string && value.description.size() <= 4000 && value.status in ['todo', 'in_progress', 'completed'] &&
         value.priority in ['low', 'medium', 'high'] && (value.dueDate == null || validDate(value.dueDate)) &&
         (value.status == 'completed' ? value.completedAt is timestamp : value.completedAt == null) &&
-        value.createdAt is timestamp && value.updatedAt == request.time && value.statusVersion is int && value.statusVersion > 0;
+        value.createdAt is timestamp && value.updatedAt == request.time && value.statusVersion is int && value.statusVersion > 0 &&
+        value.get('isDeleting', false) is bool;
+    }
+
+    function taskDeletionLockTransition() {
+      return resource.data.get('isDeleting', false) == false && request.resource.data.get('isDeleting', false) == true &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isDeleting', 'updatedAt']) &&
+        request.resource.data.status == resource.data.status && request.resource.data.statusVersion == resource.data.statusVersion;
+    }
+
+    function validTaskMutation(userId, taskId) {
+      let statusChanged = request.resource.data.status != resource.data.status;
+      return resource.data.get('isDeleting', false) == false && request.resource.data.get('isDeleting', false) == false &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'updatedAt', 'statusVersion']) &&
+        ((!statusChanged && request.resource.data.statusVersion == resource.data.statusVersion &&
+          request.resource.data.completedAt == resource.data.completedAt) ||
+         (statusChanged && request.resource.data.statusVersion == resource.data.statusVersion + 1 &&
+          getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)/statusHistory/$(request.resource.data.statusVersion)).data.status == request.resource.data.status &&
+          (request.resource.data.status == 'completed' ? request.resource.data.completedAt == request.time : request.resource.data.completedAt == null)));
     }
 
     match /users/{userId} {
@@ -107,14 +138,14 @@ service cloud.firestore {
         request.resource.data.keys().hasAll(['uid', 'email', 'displayName', 'timezone', 'createdAt', 'updatedAt']) &&
           request.resource.data.uid == userId && request.resource.data.email is string && request.resource.data.email.size() <= 320 &&
         request.resource.data.displayName is string && request.resource.data.displayName.size() <= 120 &&
-        request.resource.data.timezone is string && request.resource.data.timezone.size() > 0 && request.resource.data.timezone.size() <= 64 &&
+        validTimezone(request.resource.data.timezone) &&
         request.resource.data.createdAt == request.time && request.resource.data.updatedAt == request.time;
       allow update: if signedInAs(userId) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'timezone', 'updatedAt']) &&
         request.resource.data.uid == resource.data.uid && request.resource.data.email == resource.data.email &&
         request.resource.data.createdAt == resource.data.createdAt && request.resource.data.updatedAt == request.time &&
         request.resource.data.displayName is string && request.resource.data.displayName.size() <= 120 &&
-        request.resource.data.timezone is string && request.resource.data.timezone.size() > 0 && request.resource.data.timezone.size() <= 64;
+        validTimezone(request.resource.data.timezone);
       allow delete: if false;
 
       match /habits/{habitId} {
@@ -182,17 +213,13 @@ service cloud.firestore {
       match /tasks/{taskId} {
         allow get, list: if signedInAs(userId);
         allow create: if signedInAs(userId) && validTask(request.resource.data, userId, taskId) &&
-          request.resource.data.statusVersion == 1 && request.resource.data.createdAt == request.time &&
+          request.resource.data.statusVersion == 1 && request.resource.data.get('isDeleting', false) == false && request.resource.data.createdAt == request.time &&
+          (request.resource.data.status == 'completed' ? request.resource.data.completedAt == request.time : request.resource.data.completedAt == null) &&
           getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)/statusHistory/1).data.version == 1;
         allow update: if signedInAs(userId) && validTask(request.resource.data, userId, taskId) &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'status', 'priority', 'dueDate', 'completedAt', 'updatedAt', 'statusVersion']) &&
           request.resource.data.createdAt == resource.data.createdAt && request.resource.data.userId == resource.data.userId &&
-          ((request.resource.data.status == resource.data.status && request.resource.data.statusVersion == resource.data.statusVersion &&
-            request.resource.data.completedAt == resource.data.completedAt) ||
-           (request.resource.data.status != resource.data.status && request.resource.data.statusVersion == resource.data.statusVersion + 1 &&
-            getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)/statusHistory/$(request.resource.data.statusVersion)).data.status == request.resource.data.status &&
-            (request.resource.data.status == 'completed' ? request.resource.data.completedAt == request.time : request.resource.data.completedAt == null)));
-        allow delete: if signedInAs(userId);
+          (taskDeletionLockTransition() || validTaskMutation(userId, taskId));
+        allow delete: if signedInAs(userId) && resource.data.get('isDeleting', false) == true;
 
         match /statusHistory/{eventId} {
           allow get, list: if signedInAs(userId);
@@ -201,14 +228,16 @@ service cloud.firestore {
             request.resource.data.keys().hasAll(['id', 'userId', 'taskId', 'status', 'date', 'version', 'changedAt']) &&
             request.resource.data.id == eventId && request.resource.data.userId == userId && request.resource.data.taskId == taskId &&
             request.resource.data.status in ['todo', 'in_progress', 'completed'] && validDate(request.resource.data.date) &&
+            initialEffectiveDateAllowed(request.resource.data.date) &&
             request.resource.data.version is int && request.resource.data.version > 0 && request.resource.data.changedAt == request.time &&
             ((!exists(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)) && request.resource.data.version == 1) ||
              (exists(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)) && request.resource.data.version == get(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.statusVersion + 1)) &&
+            getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.get('isDeleting', false) == false &&
             getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.statusVersion == request.resource.data.version &&
             getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.updatedAt == request.time &&
             getAfter(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.status == request.resource.data.status;
           allow update: if false;
-          allow delete: if signedInAs(userId);
+          allow delete: if signedInAs(userId) && get(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.get('isDeleting', false) == true;
         }
       }
     }

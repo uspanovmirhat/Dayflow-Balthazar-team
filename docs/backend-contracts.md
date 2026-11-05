@@ -26,6 +26,8 @@ Every Firestore-backed function requires an authenticated user. Services use the
 - `profileExists(): Promise<boolean>` checks the current user’s profile.
 - `updateUserProfileFields({ displayName?, timezone? }): Promise<UserProfile>` updates the profile and synchronizes displayName to Firebase Auth.
 
+Timezones must be in the supported IANA allowlist in `src/backend/utils/schedules.ts`, mirrored by Firestore Rules. When reading a legacy profile with an unsupported timezone, the repository repairs it to `UTC` before returning the profile so other operations remain available.
+
 If Auth registration succeeds but profile creation fails, the Auth account remains signed in; `getUserProfile()` or a subsequent login repairs the missing profile.
 
 ## Habits and logs
@@ -73,7 +75,7 @@ Status changes set/clear `completedAt` and append an immutable versioned history
 - `getTaskAnalytics(startDate, endDate, today?)` returns current task totals/status/overdue counts and completion events in the selected period.
 - `getDashboardSummary(date?)` returns scheduled/completed habits, habit completion percentage, tasks due/completed that date, and current streak per active habit.
 
-Pure functions such as `calculateStreakSummary`, `calculateHabitAnalytics`, `calculateTaskAnalytics`, `buildCalendarDays`, `isScheduledDate`, and date helpers are also exported for reuse and unit testing.
+Pure functions such as `calculateStreakSummary`, `calculateHabitAnalytics`, `calculateTaskAnalytics`, `buildCalendarDays`, `isScheduledDate`, and date helpers are also exported for reuse and unit testing. Call `calculateStreakSummary(habit, history, logs, asOfDate, currentDate)` with the user's profile-local current date when the as-of date may differ from today; backend services do this automatically.
 
 ## Validation and frontend handling
 

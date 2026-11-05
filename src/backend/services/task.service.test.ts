@@ -71,4 +71,10 @@ describe('task service CRUD', () => {
     await expect(createTask({ title: ' ' })).rejects.toMatchObject({ code: 'validation' })
     expect(mocks.createTaskRecord).not.toHaveBeenCalled()
   })
+
+  it('uses the local date for every requested status transition despite a stale pre-read', async () => {
+    mocks.readTask.mockResolvedValueOnce({ ...task, status: 'todo' })
+    await updateTask('t1', { status: 'todo' })
+    expect(mocks.updateTaskRecord).toHaveBeenCalledWith('u1', 't1', expect.objectContaining({ localDate: '2026-11-05' }))
+  })
 })

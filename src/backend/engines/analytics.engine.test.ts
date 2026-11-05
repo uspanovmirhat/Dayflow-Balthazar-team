@@ -22,6 +22,13 @@ describe('analytics engine', () => {
     })
   })
 
+  it('does not count a habit before its first effective settings date', () => {
+    const futureSettings = [{ ...settings[0], effectiveFrom: '2026-11-05' as const }]
+    expect(calculateHabitAnalytics([habit], futureSettings, [], '2026-11-01', '2026-11-04')[0]).toMatchObject({
+      scheduledDays: 0, completedDays: 0, completionRate: 0,
+    })
+  })
+
   it('returns zero completion rate for empty task data and ranks only active habits', () => {
     const empty = calculateTaskAnalytics([], [], '2026-11-05', '2026-11-01', '2026-11-05')
     expect(empty.completionRate).toBe(0)

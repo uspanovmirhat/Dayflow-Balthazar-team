@@ -103,6 +103,6 @@ export function getHabitStreak(habitId: string, asOfDate?: LocalDate) {
     const firstDate = history.filter((item) => item.habitId === habitId).map((item) => item.effectiveFrom).sort()[0]
     if (!firstDate || firstDate > date) return { currentStreak: 0, longestStreak: 0, totalCompletedDays: 0, completionRate: 0, scheduledDays: 0 }
     const logs = await readLogsByRange(uid, firstDate, date)
-    return calculateStreakSummary(habit, history, logs, date)
+    return calculateStreakSummary(habit, history, logs, date, today)
   })
 }

@@ -71,9 +71,7 @@ export function updateTask(taskId: string, patch: Partial<TaskInput>): Promise<T
       dueDate: patch.dueDate === undefined ? current.dueDate : patch.dueDate,
     }
     validateTaskInput(merged)
-    const localDate = patch.status !== undefined && patch.status !== current.status
-      ? (await currentUserContext()).today
-      : undefined
+    const localDate = patch.status !== undefined ? (await currentUserContext()).today : undefined
     return updateTaskRecord(uid, taskId, { ...patch, localDate })
   })
 }

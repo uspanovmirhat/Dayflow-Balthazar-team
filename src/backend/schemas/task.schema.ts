@@ -21,6 +21,8 @@ export function parseTask(value: unknown, expectedUid: string, expectedId: strin
   }
   if ((status === 'completed') !== (data.completedAt !== null)) throw new BackendError('failed-precondition', 'Stored task completion state is inconsistent.')
   if (!Number.isInteger(data.statusVersion) || Number(data.statusVersion) < 1) throw new BackendError('failed-precondition', 'Stored task statusVersion is invalid.')
+  const isDeleting = data.isDeleting === undefined ? false : data.isDeleting
+  if (typeof isDeleting !== 'boolean') throw new BackendError('failed-precondition', 'Stored task deletion state is invalid.')
   return {
     id, userId,
     title: requireStoredString(data.title, 'task.title', 200),
@@ -30,7 +32,7 @@ export function parseTask(value: unknown, expectedUid: string, expectedId: strin
     completedAt: data.completedAt === null ? null : requireStoredTimestamp(data.completedAt, 'task.completedAt'),
     createdAt: requireStoredTimestamp(data.createdAt, 'task.createdAt'),
     updatedAt: requireStoredTimestamp(data.updatedAt, 'task.updatedAt'),
-    statusVersion: Number(data.statusVersion),
+    statusVersion: Number(data.statusVersion), isDeleting,
   }
 }
 

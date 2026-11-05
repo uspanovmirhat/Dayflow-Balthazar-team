@@ -59,7 +59,7 @@ export function getDailyProgress(habitId: string, date?: LocalDate): Promise<{ v
     const habit = await readHabit(uid, habitId)
     if (!habit) throw new BackendError('not-found', 'Habit was not found.')
     const [history, logs] = await Promise.all([
-      readHabitSettingsHistory(uid, selectedDate),
+      readHabitSettingsHistory(uid),
       readLogsByRange(uid, selectedDate, selectedDate),
     ])
     const day = getHabitDay(habit, history, logs, selectedDate)
