@@ -91,11 +91,10 @@ function App() {
         }
         else { setProfile(null); setHabits([]); setTasks([]); setSummary(null); setLoading(false) }
       }, (error) => { if (active) { setNotice({ kind: 'error', text: error.message }); setLoading(false) } })
-    } catch (error) { setNotice({ kind: 'error', text: errorText(error) }); setLoading(false) }
+    } catch (error) { window.setTimeout(() => { if (active) { setNotice({ kind: 'error', text: errorText(error) }); setLoading(false) } }, 0) }
     return () => { active = false; unsubscribe?.() }
   }, [refresh])
 
-  useEffect(() => { calendarDateRef.current = calendarDate; if (user) void refresh(user, false) }, [calendarDate, user, refresh])
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(null), 4500); return () => window.clearTimeout(timer) }, [notice])
 
   const today = profile ? todayAt(profile.timezone) : todayAt('UTC')
@@ -127,6 +126,7 @@ function App() {
     if (kind === 'habit') setEditingHabit(item as Habit | undefined ?? null)
     else setEditingTask(item as Task | undefined ?? null)
   }
+  const changeCalendarMonth = (date: LocalDate) => { calendarDateRef.current = date; setCalendarDate(date); if (user) void refresh(user, false) }
 
   if (loading) return <div className="boot-screen"><span className="brand-mark">d</span><span className="loader" />Загружаем Dayflow</div>
   if (!user) return <AuthScreen notice={notice} onNotice={setNotice} />
@@ -146,7 +146,7 @@ function App() {
         {page === 'dashboard' && <Dashboard profile={profile} today={today} summary={summary} progress={progress} allPlanned={allPlanned} allDone={allDone} habits={visibleHabits} tasks={visibleTasks} streaks={streaks} analytics={habitAnalytics} onToggleHabit={toggleHabit} onToggleTask={toggleTask} onCreate={showForm} onNavigate={setPage} onEditHabit={(item) => showForm('habit', item)} onEditTask={(item) => showForm('task', item)} />}
         {page === 'habits' && <HabitsPage habits={visibleHabits} today={today} streaks={streaks} onAdd={() => showForm('habit')} onToggle={toggleHabit} onEdit={(item) => showForm('habit', item)} onArchive={async (item) => { if (!window.confirm(`Архивировать привычку «${item.name}»?`)) return; try { await archiveHabit(item.id); await afterMutation('Привычка архивирована') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onDelete={async (item) => { if (!window.confirm(`Удалить привычку «${item.name}» вместе с историей?`)) return; try { await deleteHabit(item.id); await afterMutation('Привычка удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
         {page === 'tasks' && <TasksPage tasks={visibleTasks} onAdd={() => showForm('task')} onToggle={toggleTask} onEdit={(item) => showForm('task', item)} onDelete={async (item) => { if (!window.confirm(`Удалить задачу «${item.title}»?`)) return; try { await deleteTask(item.id); await afterMutation('Задача удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
-        {page === 'calendar' && <CalendarPage date={calendarDate} days={calendar} onChange={setCalendarDate} />}
+        {page === 'calendar' && <CalendarPage date={calendarDate} days={calendar} onChange={changeCalendarMonth} />}
         {page === 'analytics' && <AnalyticsPage habits={habitAnalytics} tasks={taskAnalytics} completedTasks={completedTasks} />}
         {page === 'profile' && profile && <ProfilePage profile={profile} onSave={async (fields) => { try { const next = await updateUserProfileFields(fields); setProfile(next); await afterMutation('Профиль обновлён') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onLogout={() => void logout()} />}
       </div>
@@ -207,9 +207,8 @@ function HabitsPage({ habits, today, streaks, onAdd, onToggle, onEdit, onArchive
   const [loadError, setLoadError] = useState<string | null>(null)
   useEffect(() => {
     let live = true
-    setLoadError(null)
     Promise.all([Promise.all(habits.map(async (habit) => [habit.id, (await getDailyProgress(habit.id, today)).completed] as const)), getHabitLogs(addDays(today, -29), today)])
-      .then(([entries, recent]) => { if (live) { setLogs(Object.fromEntries(entries)); setHistory(recent.sort((a, b) => b.date.localeCompare(a.date))) } })
+      .then(([entries, recent]) => { if (live) { setLoadError(null); setLogs(Object.fromEntries(entries)); setHistory(recent.sort((a, b) => b.date.localeCompare(a.date))) } })
       .catch((error: unknown) => { if (live) setLoadError(errorText(error)) })
     return () => { live = false }
   }, [habits, today])
