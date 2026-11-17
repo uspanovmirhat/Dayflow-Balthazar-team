@@ -1,4 +1,4 @@
-import { getApp, getApps, initializeApp } from 'firebase/app'
+import { getApps, initializeApp } from 'firebase/app'
 import { connectAuthEmulator, getAuth } from 'firebase/auth'
 import { connectFirestoreEmulator, getFirestore } from 'firebase/firestore'
 import { BackendError } from '../utils/errors'
@@ -21,7 +21,8 @@ export function getFirebaseServices() {
     throw new BackendError('configuration', `Missing Firebase environment variables: ${missing.join(', ')}.`)
   }
 
-  const app = getApps().length > 0 ? getApp() : initializeApp({
+  const existingDefaultApp = getApps().find((candidate) => candidate.name === '[DEFAULT]')
+  const app = existingDefaultApp ?? initializeApp({
     apiKey: env.VITE_FIREBASE_API_KEY,
     authDomain: env.VITE_FIREBASE_AUTH_DOMAIN,
     projectId: env.VITE_FIREBASE_PROJECT_ID,
@@ -29,8 +30,11 @@ export function getFirebaseServices() {
     messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID,
     appId: env.VITE_FIREBASE_APP_ID,
   })
+  if (app.options.projectId !== env.VITE_FIREBASE_PROJECT_ID) {
+    throw new BackendError('configuration', 'The existing Firebase App project does not match VITE_FIREBASE_PROJECT_ID.')
+  }
   const auth = getAuth(app)
-  const db = getFirestore(app)
+  const db = getFirestore(app, '(default)')
 
   if (env.VITE_USE_FIREBASE_EMULATORS === 'true') {
     const authHost = env.VITE_FIREBASE_AUTH_EMULATOR_HOST || '127.0.0.1:9099'
