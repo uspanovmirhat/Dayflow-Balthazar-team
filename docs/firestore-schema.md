@@ -23,6 +23,8 @@ Timestamps are Firestore `serverTimestamp()` values. Dates are local-date string
 | `settingsHistory`: `userId ASC, effectiveFrom ASC` | Read a user’s effective-dated settings versions; versions are then selected in memory for each requested date. |
 | `statusHistory`: `userId ASC, date ASC` | Read task status transitions for a selected period. |
 
+The `fieldOverrides` section also enables the collection-group ascending single-field index `settingsHistory.userId`. `readHabitSettingsHistory(uid)` filters only by `userId`; the composite index above is used when the query also filters by `effectiveFrom`.
+
 Task queries filter by one field at a time (`status == ...` or `dueDate` range), so Firestore’s automatic single-field indexes cover the current repository methods. If a future UI asks for status plus due-date filtering or multi-field ordering, add the matching composite index alongside that query.
 
 ## Security Rules
