@@ -22,6 +22,30 @@ describe('habit schedules', () => {
     expect(isScheduledDate(schedule, '2026-11-04')).toBe(false)
   })
 
+  it.each([1, 2, 3, 7, 14, 30, 365])('supports an interval of %i days', (everyNDays) => {
+    const schedule = { type: 'interval' as const, everyNDays, startDate: '2026-01-01' as const }
+    expect(isScheduledDate(schedule, '2026-01-01')).toBe(true)
+    expect(isScheduledDate(schedule, '2026-01-02')).toBe(everyNDays === 1)
+    expect(isScheduledDate(schedule, '2026-12-31')).toBe((364 % everyNDays) === 0)
+  })
+
+  it('keeps interval cadence stable across month and year boundaries', () => {
+    const schedule = { type: 'interval' as const, everyNDays: 3, startDate: '2026-11-29' as const }
+    expect(isScheduledDate(schedule, '2026-11-29')).toBe(true)
+    expect(isScheduledDate(schedule, '2026-12-02')).toBe(true)
+    expect(isScheduledDate(schedule, '2026-12-05')).toBe(true)
+    expect(isScheduledDate(schedule, '2027-01-01')).toBe(true)
+    expect(isScheduledDate(schedule, '2027-01-02')).toBe(false)
+  })
+
+  it('does not move the anchor when an interval day is missed', () => {
+    const schedule = { type: 'interval' as const, everyNDays: 2, startDate: '2026-11-23' as const }
+    expect(isScheduledDate(schedule, '2026-11-23')).toBe(true)
+    expect(isScheduledDate(schedule, '2026-11-24')).toBe(false)
+    expect(isScheduledDate(schedule, '2026-11-25')).toBe(true)
+    expect(isScheduledDate(schedule, '2026-11-27')).toBe(true)
+  })
+
   it('rejects malformed schedules and duplicate weekdays', () => {
     expect(() => validateSchedule({ type: 'weekdays', days: [1, 1] })).toThrow()
     expect(() => validateSchedule({ type: 'interval', everyNDays: 0, startDate: '2026-11-05' })).toThrow()

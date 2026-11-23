@@ -293,6 +293,23 @@ describe('Firestore security rules', () => {
     }
   })
 
+  it('allows a valid habit color and rejects malformed colors in settings updates', async () => {
+    await seedOwnHabit()
+    const db = testEnvironment.authenticatedContext('u1').firestore()
+    const effectiveFrom = utcDateAfter(1)
+    const commitColorUpdate = async (color: string) => {
+      const batch = writeBatch(db)
+      batch.update(doc(db, 'users/u1/habits/h1'), { color, settingsVersion: 2, updatedAt: serverTimestamp() })
+      batch.set(doc(db, 'users/u1/habits/h1/settingsHistory/2'), {
+        id: '2', userId: 'u1', habitId: 'h1', type: 'boolean', targetPerDay: 1,
+        schedule: { type: 'daily' }, isArchived: false, effectiveFrom, version: 2, createdAt: serverTimestamp(),
+      })
+      return batch.commit()
+    }
+    await assertFails(commitColorUpdate('not-a-color'))
+    await assertSucceeds(commitColorUpdate('#12ABCD'))
+  })
+
   it('rejects backdated settings versions and permits only bounded future effective dates', async () => {
     await seedOwnHabit()
     const db = testEnvironment.authenticatedContext('u1').firestore()

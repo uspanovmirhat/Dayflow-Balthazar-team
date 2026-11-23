@@ -8,7 +8,7 @@ const timestamp = Timestamp.fromDate(new Date('2026-11-01T00:00:00.000Z'))
 describe('calendar engine', () => {
   it('combines scheduled habit results and due tasks into local date buckets', () => {
     const habits: Habit[] = [{
-      id: 'read', userId: 'u', name: 'Read', description: '', type: 'boolean', targetPerDay: 1,
+      id: 'read', userId: 'u', name: 'Read', description: '', color: '#6A9BC5', type: 'boolean', targetPerDay: 1,
       schedule: { type: 'daily' }, isArchived: false, archivedFrom: null, isDeleting: false, settingsVersion: 1,
       createdAt: timestamp, updatedAt: timestamp,
     }]
@@ -24,8 +24,44 @@ describe('calendar engine', () => {
       dueDate: '2026-11-06', completedAt: null, createdAt: timestamp, updatedAt: timestamp, statusVersion: 1,
     }]
     expect(buildCalendarDays(habits, history, logs, tasks, '2026-11-05', '2026-11-06')).toEqual([
-      { date: '2026-11-05', events: [{ kind: 'habit', id: 'read:2026-11-05', habitId: 'read', title: 'Read', date: '2026-11-05', completed: true, value: 1, target: 1 }] },
-      { date: '2026-11-06', events: [{ kind: 'habit', id: 'read:2026-11-06', habitId: 'read', title: 'Read', date: '2026-11-06', completed: false, value: 0, target: 1 }, { kind: 'task', id: 't1', title: 'Plan', date: '2026-11-06', status: 'todo', priority: 'medium' }] },
+      { date: '2026-11-05', events: [{ kind: 'habit', id: 'read:2026-11-05', habitId: 'read', title: 'Read', date: '2026-11-05', color: '#6A9BC5', completed: true, value: 1, target: 1 }] },
+      { date: '2026-11-06', events: [{ kind: 'habit', id: 'read:2026-11-06', habitId: 'read', title: 'Read', date: '2026-11-06', color: '#6A9BC5', completed: false, value: 0, target: 1 }, { kind: 'task', id: 't1', title: 'Plan', date: '2026-11-06', status: 'todo', priority: 'medium' }] },
     ])
+  })
+
+  it('shows quantitative progress and completion from all logs for a day', () => {
+    const habit: Habit = {
+      id: 'water', userId: 'u', name: 'Water', description: '', color: '#6A9BC5', type: 'count', targetPerDay: 3,
+      schedule: { type: 'daily' }, isArchived: false, archivedFrom: null, isDeleting: false, settingsVersion: 1,
+      createdAt: timestamp, updatedAt: timestamp,
+    }
+    const settings: HabitSettings[] = [{
+      id: '1', userId: 'u', habitId: 'water', type: 'count', targetPerDay: 3, schedule: { type: 'daily' },
+      isArchived: false, effectiveFrom: '2026-11-05', version: 1, createdAt: timestamp,
+    }]
+    const logs: HabitLog[] = [1, 2].map((n) => ({
+      id: String(n), userId: 'u', habitId: 'water', value: 1, date: '2026-11-05', settingsVersion: 1, completedAt: timestamp,
+    }))
+    const [day] = buildCalendarDays([habit], settings, logs, [], '2026-11-05', '2026-11-05')
+    expect(day.events[0]).toMatchObject({ kind: 'habit', value: 2, target: 3, completed: false })
+  })
+
+  it('omits interval habits on rest days while retaining actual completion logs', () => {
+    const habit: Habit = {
+      id: 'walk', userId: 'u', name: 'Walk', description: '', color: '#6A9BC5', type: 'boolean', targetPerDay: 1,
+      schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-29' }, isArchived: false, archivedFrom: null,
+      isDeleting: false, settingsVersion: 1, createdAt: timestamp, updatedAt: timestamp,
+    }
+    const settings: HabitSettings[] = [{
+      id: '1', userId: 'u', habitId: 'walk', type: 'boolean', targetPerDay: 1, schedule: habit.schedule,
+      isArchived: false, effectiveFrom: '2026-11-29', version: 1, createdAt: timestamp,
+    }]
+    const logs: HabitLog[] = [{
+      id: 'walk:2026-12-02', userId: 'u', habitId: 'walk', value: 1, date: '2026-12-02', settingsVersion: 1, completedAt: timestamp,
+    }]
+    const days = buildCalendarDays([habit], settings, logs, [], '2026-11-29', '2026-12-05')
+    expect(days.find((day) => day.date === '2026-11-30')?.events).toEqual([])
+    expect(days.find((day) => day.date === '2026-12-02')?.events[0]).toMatchObject({ kind: 'habit', completed: true })
+    expect(days.find((day) => day.date === '2026-12-05')?.events).toHaveLength(1)
   })
 })

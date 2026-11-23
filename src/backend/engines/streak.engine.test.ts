@@ -5,7 +5,7 @@ import type { Habit, HabitLog, HabitSettings } from '../types'
 
 const createdAt = Timestamp.fromDate(new Date('2026-11-01T00:00:00.000Z'))
 const habit: Habit = {
-  id: 'read', userId: 'user-1', name: 'Read', description: '', type: 'boolean', targetPerDay: 1,
+  id: 'read', userId: 'user-1', name: 'Read', description: '', color: '#6A9BC5', type: 'boolean', targetPerDay: 1,
   schedule: { type: 'weekdays', days: [1, 2, 3, 4, 5] }, isArchived: false, archivedFrom: null, isDeleting: false,
   settingsVersion: 1, createdAt, updatedAt: createdAt,
 }

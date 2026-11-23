@@ -34,6 +34,7 @@ import type { Habit } from '../types'
 
 const habit = {
   id: 'h1', userId: 'u1', name: 'Read', description: '', type: 'boolean', targetPerDay: 1,
+  color: '#667788',
   schedule: { type: 'daily' }, isArchived: false, archivedFrom: null, isDeleting: false,
   settingsVersion: 1,
 } as Habit
@@ -53,13 +54,39 @@ beforeEach(() => {
 describe('habit service CRUD', () => {
   it('creates a trimmed habit with initial settings effective today', async () => {
     await createHabit({ name: '  Read  ', type: 'boolean', targetPerDay: 1, schedule: { type: 'daily' } })
-    expect(mocks.createHabitRecord).toHaveBeenCalledWith('u1', expect.objectContaining({ name: 'Read', effectiveFrom: '2026-11-05' }))
+    expect(mocks.createHabitRecord).toHaveBeenCalledWith('u1', expect.objectContaining({ name: 'Read', effectiveFrom: '2026-11-05', color: expect.stringMatching(/^#[\da-f]{6}$/i) }))
+  })
+
+  it('preserves an explicitly selected color and keeps it during edits when omitted', async () => {
+    await createHabit({ name: 'Read', type: 'boolean', targetPerDay: 1, schedule: { type: 'daily' }, color: '#12aBcD' })
+    expect(mocks.createHabitRecord).toHaveBeenCalledWith('u1', expect.objectContaining({ color: '#12ABCD' }))
+    await updateHabit('h1', { name: 'Read', type: 'boolean', targetPerDay: 1, schedule: { type: 'daily' } })
+    expect(mocks.updateHabitSettings).toHaveBeenCalledWith('u1', 'h1', expect.objectContaining({ color: '#667788' }))
+  })
+
+  it('anchors a new interval schedule to the profile local creation date', async () => {
+    await createHabit({ name: 'Walk', type: 'boolean', targetPerDay: 1, schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-01' } })
+    expect(mocks.createHabitRecord).toHaveBeenCalledWith('u1', expect.objectContaining({
+      schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-05' }, effectiveFrom: '2026-11-05',
+    }))
   })
 
   it('updates settings effective next local day and rejects type changes', async () => {
     await updateHabit('h1', { name: 'Read more', type: 'boolean', targetPerDay: 1, schedule: { type: 'daily' } })
     expect(mocks.updateHabitSettings).toHaveBeenCalledWith('u1', 'h1', expect.objectContaining({ effectiveFrom: '2026-11-06' }))
     await expect(updateHabit('h1', { name: 'Read', type: 'count', targetPerDay: 2, schedule: { type: 'daily' } })).rejects.toMatchObject({ code: 'failed-precondition' })
+  })
+
+  it('anchors a first interval to its effective date and preserves an existing interval anchor', async () => {
+    await updateHabit('h1', { name: 'Read', type: 'boolean', targetPerDay: 1, schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-05' } })
+    expect(mocks.updateHabitSettings).toHaveBeenCalledWith('u1', 'h1', expect.objectContaining({
+      schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-06' }, effectiveFrom: '2026-11-06',
+    }))
+    mocks.readHabit.mockResolvedValue({ ...habit, schedule: { type: 'interval', everyNDays: 2, startDate: '2026-10-01' } })
+    await updateHabit('h1', { name: 'Read', type: 'boolean', targetPerDay: 1, schedule: { type: 'interval', everyNDays: 5, startDate: '2026-11-05' } })
+    expect(mocks.updateHabitSettings).toHaveBeenLastCalledWith('u1', 'h1', expect.objectContaining({
+      schedule: { type: 'interval', everyNDays: 5, startDate: '2026-10-01' },
+    }))
   })
 
   it('archives via a versioned settings change and excludes deleting habits from reads', async () => {

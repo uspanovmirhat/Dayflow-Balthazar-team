@@ -22,6 +22,7 @@ export interface Habit {
   userId: string
   name: string
   description: string
+  color: string
   type: HabitType
   targetPerDay: number
   schedule: HabitSchedule
@@ -120,7 +121,7 @@ export interface TaskAnalytics {
 }
 
 export type CalendarEvent =
-  | { kind: 'habit'; id: string; habitId: string; title: string; date: LocalDate; completed: boolean; value: number; target: number }
+  | { kind: 'habit'; id: string; habitId: string; title: string; date: LocalDate; color: string; completed: boolean; value: number; target: number }
   | { kind: 'task'; id: string; title: string; date: LocalDate; status: TaskStatus; priority: TaskPriority }
 
 export interface CalendarDay {
