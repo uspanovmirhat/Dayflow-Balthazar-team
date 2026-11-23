@@ -24,6 +24,7 @@ export function buildCalendarDays(
         habitId: habit.id,
         title: habit.name,
         date,
+        color: habit.color,
         completed: day.completed,
         value: day.value,
         target: day.target,

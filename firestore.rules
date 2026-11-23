@@ -81,6 +81,10 @@ service cloud.firestore {
       );
     }
 
+    function validHabitColor(value) {
+      return value is string && value.matches('^#[0-9A-Fa-f]{6}$');
+    }
+
     function validHabitSettings(value, userId, habitId) {
       return value.keys().hasOnly(['id', 'userId', 'habitId', 'type', 'targetPerDay', 'schedule', 'isArchived', 'effectiveFrom', 'version', 'createdAt']) &&
         value.keys().hasAll(['id', 'userId', 'habitId', 'type', 'targetPerDay', 'schedule', 'isArchived', 'effectiveFrom', 'version', 'createdAt']) &&
@@ -92,10 +96,10 @@ service cloud.firestore {
     }
 
     function validHabit(value, userId, habitId) {
-      return value.keys().hasOnly(['id', 'userId', 'name', 'description', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'isDeleting', 'settingsVersion', 'createdAt', 'updatedAt']) &&
+      return value.keys().hasOnly(['id', 'userId', 'name', 'description', 'color', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'isDeleting', 'settingsVersion', 'createdAt', 'updatedAt']) &&
         value.keys().hasAll(['id', 'userId', 'name', 'description', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'settingsVersion', 'createdAt', 'updatedAt']) &&
         value.id == habitId && value.userId == userId && value.name is string && value.name.size() > 0 && value.name.size() <= 120 &&
-        value.description is string && value.description.size() <= 2000 && value.type in ['boolean', 'count'] &&
+        value.description is string && value.description.size() <= 2000 && validHabitColor(value.get('color', '#000000')) && value.type in ['boolean', 'count'] &&
         value.targetPerDay is number && value.targetPerDay > 0 && value.targetPerDay <= 1000000 && (value.type != 'boolean' || value.targetPerDay == 1) &&
         validSchedule(value.schedule) && value.isArchived is bool &&
         (value.isArchived ? validDate(value.archivedFrom) : value.archivedFrom == null) && value.get('isDeleting', false) is bool && value.settingsVersion is int && value.settingsVersion > 0 &&
@@ -162,7 +166,7 @@ service cloud.firestore {
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isDeleting', 'updatedAt']) &&
             request.resource.data.settingsVersion == resource.data.settingsVersion) ||
            (resource.data.get('isDeleting', false) == false && request.resource.data.get('isDeleting', false) == false &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'description', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'settingsVersion', 'updatedAt']) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'description', 'color', 'type', 'targetPerDay', 'schedule', 'isArchived', 'archivedFrom', 'settingsVersion', 'updatedAt']) &&
             request.resource.data.type == resource.data.type &&
             request.resource.data.settingsVersion == resource.data.settingsVersion + 1 &&
             getAfter(/databases/$(database)/documents/users/$(userId)/habits/$(habitId)/settingsHistory/$(request.resource.data.settingsVersion)).data.version == request.resource.data.settingsVersion &&

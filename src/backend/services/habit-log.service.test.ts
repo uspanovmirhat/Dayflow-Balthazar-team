@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   readHabit: vi.fn(),
   readHabitLog: vi.fn(),
   readHabitSettingsHistory: vi.fn(),
+  readHabitSettingsForHabit: vi.fn(),
+  readHabitLogsByRange: vi.fn(),
   readLogsByRange: vi.fn(),
   createHabitLogRecord: vi.fn(),
   deleteHabitLogRecord: vi.fn(),
@@ -18,6 +20,8 @@ vi.mock('../repositories/habit.repository', () => ({
   readHabit: mocks.readHabit,
   readHabitLog: mocks.readHabitLog,
   readHabitSettingsHistory: mocks.readHabitSettingsHistory,
+  readHabitSettingsForHabit: mocks.readHabitSettingsForHabit,
+  readHabitLogsByRange: mocks.readHabitLogsByRange,
   readLogsByRange: mocks.readLogsByRange,
   createHabitLogRecord: mocks.createHabitLogRecord,
   deleteHabitLogRecord: mocks.deleteHabitLogRecord,
@@ -32,8 +36,8 @@ vi.mock('./shared', () => ({
   runBackendOperation: (operation: () => Promise<unknown>) => operation(),
 }))
 
-import { addHabitLog, removeHabitLog } from './habit-log.service'
-import type { Habit, HabitSettings } from '../types'
+import { addHabitLog, getDailyProgress, getHabitLogs, removeHabitLog } from './habit-log.service'
+import type { Habit, HabitSettings, LocalDate } from '../types'
 
 const habit = {
   id: 'h1', userId: 'u1', name: 'Read', description: '', type: 'boolean', targetPerDay: 1,
@@ -52,6 +56,8 @@ beforeEach(() => {
   mocks.currentUserId.mockReturnValue('u1')
   mocks.readHabit.mockResolvedValue(habit)
   mocks.readHabitSettingsHistory.mockResolvedValue([settings])
+  mocks.readHabitSettingsForHabit.mockResolvedValue([settings])
+  mocks.readHabitLogsByRange.mockResolvedValue([])
   mocks.readLogsByRange.mockResolvedValue([])
   mocks.settingsForDate.mockReturnValue(settings)
   mocks.createHabitLogRecord.mockResolvedValue({ id: 'log1' })
@@ -77,7 +83,16 @@ describe('habit log service', () => {
 
   it('writes a scheduled boolean log using the settings version effective on that date', async () => {
     await addHabitLog('h1')
+    expect(mocks.readHabitSettingsForHabit).toHaveBeenCalledWith('u1', 'h1', '2026-11-05')
     expect(mocks.createHabitLogRecord).toHaveBeenCalledWith('u1', expect.objectContaining({ settingsVersion: 2 }), 1, '2026-11-05')
+    expect(mocks.readHabitLogsByRange).not.toHaveBeenCalled()
+  })
+
+  it('prevents a second boolean completion for the same local day', async () => {
+    mocks.createHabitLogRecord.mockRejectedValue(Object.assign(new Error('already exists'), { code: 'already-exists' }))
+    await expect(addHabitLog('h1')).rejects.toMatchObject({ code: 'already-exists' })
+    expect(mocks.createHabitLogRecord).toHaveBeenCalledOnce()
+    expect(mocks.readHabitLogsByRange).not.toHaveBeenCalled()
   })
 
   it('validates and forwards count increments and supports log deletion', async () => {
@@ -87,5 +102,41 @@ describe('habit log service', () => {
     expect(mocks.createHabitLogRecord).toHaveBeenCalledWith('u1', expect.objectContaining({ type: 'count', settingsVersion: 2 }), 3, '2026-11-05')
     await removeHabitLog('h1', 'log1')
     expect(mocks.deleteHabitLogRecord).toHaveBeenCalledWith('u1', 'h1', 'log1')
+  })
+
+  it('allows repeated count completions as separate log records', async () => {
+    mocks.readHabit.mockResolvedValue({ ...habit, type: 'count' })
+    mocks.settingsForDate.mockReturnValue({ ...settings, type: 'count', targetPerDay: 3 })
+    mocks.createHabitLogRecord
+      .mockResolvedValueOnce({ id: 'log-1', value: 1 })
+      .mockResolvedValueOnce({ id: 'log-2', value: 1 })
+
+    await addHabitLog('h1', { value: 1 })
+    await addHabitLog('h1', { value: 1 })
+
+    expect(mocks.createHabitLogRecord).toHaveBeenCalledTimes(2)
+    expect(mocks.createHabitLogRecord).toHaveBeenNthCalledWith(1, 'u1', expect.objectContaining({ type: 'count' }), 1, '2026-11-05')
+    expect(mocks.createHabitLogRecord).toHaveBeenNthCalledWith(2, 'u1', expect.objectContaining({ type: 'count' }), 1, '2026-11-05')
+  })
+
+  it('restores daily progress from persisted habit log values', async () => {
+    const logs = [{ id: 'log-1', habitId: 'h1', date: '2026-11-05', value: 1 }, { id: 'log-2', habitId: 'h1', date: '2026-11-05', value: 1 }]
+    mocks.readHabit.mockResolvedValue({ ...habit, type: 'count' })
+    mocks.readHabitSettingsForHabit.mockResolvedValue([{ ...settings, type: 'count', targetPerDay: 3 }])
+    mocks.readHabitLogsByRange.mockResolvedValue(logs)
+    mocks.getHabitDay.mockReturnValue({ value: 2, target: 3, completed: false })
+
+    await expect(getDailyProgress('h1')).resolves.toEqual({ value: 2, target: 3, completed: false })
+    expect(mocks.readHabitLogsByRange).toHaveBeenCalledWith('u1', 'h1', '2026-11-05', '2026-11-05')
+    expect(mocks.getHabitDay).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), logs, '2026-11-05')
+  })
+
+  it('reads a habit-scoped log range without using the global collection-group query', async () => {
+    const logs = [{ id: 'log-1', habitId: 'h1' }]
+    mocks.readHabitLogsByRange.mockResolvedValue(logs)
+
+    await expect(getHabitLogs('2026-11-01' as LocalDate, '2026-11-05' as LocalDate, 'h1')).resolves.toEqual(logs)
+    expect(mocks.readHabitLogsByRange).toHaveBeenCalledWith('u1', 'h1', '2026-11-01', '2026-11-05')
+    expect(mocks.readLogsByRange).not.toHaveBeenCalled()
   })
 })

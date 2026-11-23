@@ -39,6 +39,7 @@ export async function createHabitRecord(uid: string, input: {
   type: HabitType
   targetPerDay: number
   schedule: HabitSchedule
+  color: string
   effectiveFrom: LocalDate
 }): Promise<Habit> {
   const db = getFirebaseServices().db
@@ -47,6 +48,7 @@ export async function createHabitRecord(uid: string, input: {
   await runTransaction(db, async (transaction) => {
     transaction.set(habit, {
       id: habit.id, userId: uid, name: input.name, description: input.description,
+      color: input.color,
       type: input.type, targetPerDay: input.targetPerDay, schedule: input.schedule,
       isArchived: false, archivedFrom: null, isDeleting: false, settingsVersion: 1,
       createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
@@ -78,6 +80,7 @@ export async function updateHabitSettings(uid: string, habitId: string, settings
   type: HabitType
   targetPerDay: number
   schedule: HabitSchedule
+  color: string
   effectiveFrom: LocalDate
 }): Promise<Habit> {
   const db = getFirebaseServices().db
@@ -94,6 +97,7 @@ export async function updateHabitSettings(uid: string, habitId: string, settings
       type: settings.type,
       targetPerDay: settings.targetPerDay,
       schedule: settings.schedule,
+      color: settings.color,
       settingsVersion: nextVersion,
       updatedAt: serverTimestamp(),
     })
@@ -151,6 +155,12 @@ export async function readHabitSettingsHistory(uid: string, throughDate?: LocalD
   })
 }
 
+export async function readHabitSettingsForHabit(uid: string, habitId: string, throughDate?: LocalDate): Promise<HabitSettings[]> {
+  const filters = throughDate ? [where('effectiveFrom', '<=', throughDate)] : []
+  const snapshot = await getDocs(query(settingsRef(uid, habitId), ...filters))
+  return snapshot.docs.map((item) => parseHabitSettings(item.data(), uid, habitId, item.id))
+}
+
 export async function readLogsByRange(uid: string, startDate: LocalDate, endDate: LocalDate): Promise<HabitLog[]> {
   const snapshot = await getDocs(query(
     collectionGroup(getFirebaseServices().db, 'logs'),
@@ -163,6 +173,15 @@ export async function readLogsByRange(uid: string, startDate: LocalDate, endDate
     if (!habitId) throw new BackendError('failed-precondition', 'Habit log is outside the expected path.')
     return parseHabitLog(item.data(), uid, habitId, item.id)
   })
+}
+
+export async function readHabitLogsByRange(uid: string, habitId: string, startDate: LocalDate, endDate: LocalDate): Promise<HabitLog[]> {
+  const snapshot = await getDocs(query(
+    logsRef(uid, habitId),
+    where('date', '>=', startDate),
+    where('date', '<=', endDate),
+  ))
+  return snapshot.docs.map((item) => parseHabitLog(item.data(), uid, habitId, item.id))
 }
 
 export async function readHabitLog(uid: string, habitId: string, logId: string): Promise<HabitLog | null> {

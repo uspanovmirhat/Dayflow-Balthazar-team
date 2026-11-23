@@ -22,5 +22,6 @@ export { calculateHabitAnalytics, calculateTaskAnalytics, rankHabits } from './e
 export { buildCalendarDays } from './engines/calendar.engine'
 export { addDays, assertLocalDate, assertTimeZone, daysBetween, endOfMonth, enumerateDates, isLocalDate, localDateInTimeZone, startOfIsoWeek } from './utils/dates'
 export { isScheduledDate, validateSchedule } from './utils/schedules'
+export { isHabitColor, randomHabitColor, stableHabitColor, validateHabitColor } from './utils/colors'
 export { BackendError, toBackendError } from './utils/errors'
 export type * from './types'

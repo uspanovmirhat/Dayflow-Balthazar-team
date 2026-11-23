@@ -5,7 +5,7 @@ import type { Habit, HabitLog, HabitSettings, Task } from '../types'
 
 const timestamp = Timestamp.fromDate(new Date('2026-11-01T00:00:00.000Z'))
 const habit: Habit = {
-  id: 'walk', userId: 'u', name: 'Walk', description: '', type: 'boolean', targetPerDay: 1,
+  id: 'walk', userId: 'u', name: 'Walk', description: '', color: '#6A9BC5', type: 'boolean', targetPerDay: 1,
   schedule: { type: 'daily' }, isArchived: false, archivedFrom: null, isDeleting: false, settingsVersion: 1,
   createdAt: timestamp, updatedAt: timestamp,
 }
@@ -27,6 +27,20 @@ describe('analytics engine', () => {
     expect(calculateHabitAnalytics([habit], futureSettings, [], '2026-11-01', '2026-11-04')[0]).toMatchObject({
       scheduledDays: 0, completedDays: 0, completionRate: 0,
     })
+  })
+
+  it('uses cumulative count logs to determine daily analytics progress', () => {
+    const countHabit: Habit = { ...habit, id: 'water', type: 'count', targetPerDay: 3 }
+    const countSettings: HabitSettings[] = [{ ...settings[0], habitId: 'water', type: 'count', targetPerDay: 3 }]
+    const countLogs: HabitLog[] = [
+      { id: 'one', userId: 'u', habitId: 'water', value: 1, date: '2026-11-03', settingsVersion: 1, completedAt: timestamp },
+      { id: 'two', userId: 'u', habitId: 'water', value: 1, date: '2026-11-03', settingsVersion: 1, completedAt: timestamp },
+    ]
+    const result = calculateHabitAnalytics([countHabit], countSettings, countLogs, '2026-11-03', '2026-11-03')[0]
+    expect(result).toMatchObject({ completedDays: 0, progress: [{ value: 2, target: 3, completed: false }] })
+    expect(calculateHabitAnalytics([countHabit], countSettings, [...countLogs, {
+      id: 'three', userId: 'u', habitId: 'water', value: 1, date: '2026-11-03', settingsVersion: 1, completedAt: timestamp,
+    }], '2026-11-03', '2026-11-03')[0]).toMatchObject({ completedDays: 1, progress: [{ value: 3, target: 3, completed: true }] })
   })
 
   it('returns zero completion rate for empty task data and ranks only active habits', () => {

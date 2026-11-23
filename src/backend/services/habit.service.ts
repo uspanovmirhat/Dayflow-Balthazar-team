@@ -7,6 +7,7 @@ import { calculateStreakSummary } from '../engines/streak.engine'
 import { currentUserContext, currentUserId, runBackendOperation } from './shared'
 import type { Habit, HabitSchedule, HabitType, LocalDate } from '../types'
 import { assertLocalDate } from '../utils/dates'
+import { randomHabitColor, validateHabitColor } from '../utils/colors'
 
 export interface HabitInput {
   name: string
@@ -14,15 +15,20 @@ export interface HabitInput {
   type: HabitType
   targetPerDay: number
   schedule: HabitSchedule
+  color?: string
 }
 
 export function createHabit(input: HabitInput): Promise<Habit> {
   return runBackendOperation(async () => {
     validateHabitInput(input)
+    if (input.color !== undefined) validateHabitColor(input.color)
     const { uid, today } = await currentUserContext()
+    const schedule = input.schedule.type === 'interval'
+      ? { ...input.schedule, startDate: today }
+      : input.schedule
     return createHabitRecord(uid, {
       name: input.name.trim(), description: input.description?.trim() ?? '',
-      type: input.type, targetPerDay: input.targetPerDay, schedule: input.schedule, effectiveFrom: today,
+      type: input.type, targetPerDay: input.targetPerDay, schedule, color: input.color?.toUpperCase() ?? randomHabitColor(), effectiveFrom: today,
     })
   })
 }
@@ -48,14 +54,22 @@ export function updateHabit(habitId: string, input: HabitInput): Promise<Habit> 
   return runBackendOperation(async () => {
     validateId(habitId, 'habitId')
     validateHabitInput(input)
+    if (input.color !== undefined) validateHabitColor(input.color)
     const { uid, today } = await currentUserContext()
     const existing = await readHabit(uid, habitId)
     if (!existing) throw new BackendError('not-found', 'Habit was not found.')
     if (existing.isDeleting) throw new BackendError('failed-precondition', 'A habit being deleted cannot be updated.')
     if (existing.type !== input.type) throw new BackendError('failed-precondition', 'Habit type is immutable. Create a new habit to change between boolean and count.')
+    const schedule = input.schedule.type === 'interval'
+      ? {
+          ...input.schedule,
+          startDate: existing.schedule.type === 'interval' ? existing.schedule.startDate : addDays(today, 1),
+        }
+      : input.schedule
     return updateHabitSettings(uid, habitId, {
       name: input.name.trim(), description: input.description?.trim() ?? '',
-      type: input.type, targetPerDay: input.targetPerDay, schedule: input.schedule,
+      type: input.type, targetPerDay: input.targetPerDay, schedule,
+      color: input.color?.toUpperCase() ?? existing.color,
       effectiveFrom: addDays(today, 1),
     })
   })

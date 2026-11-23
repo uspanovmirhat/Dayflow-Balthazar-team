@@ -1,4 +1,4 @@
-import { readHabit, readHabitLog, readHabitSettingsHistory, readLogsByRange, createHabitLogRecord, deleteHabitLogRecord } from '../repositories/habit.repository'
+import { readHabit, readHabitLog, readHabitLogsByRange, readHabitSettingsForHabit, readLogsByRange, createHabitLogRecord, deleteHabitLogRecord } from '../repositories/habit.repository'
 import { getHabitDay, settingsForDate } from '../engines/streak.engine'
 import { BackendError } from '../utils/errors'
 import { assertLocalDate } from '../utils/dates'
@@ -18,17 +18,13 @@ export function addHabitLog(habitId: string, input: { value?: number; date?: Loc
     const habit = await readHabit(uid, habitId)
     if (!habit) throw new BackendError('not-found', 'Habit was not found.')
     if (habit.isDeleting) throw new BackendError('failed-precondition', 'A habit being deleted cannot receive new logs.')
-    const history = await readHabitSettingsHistory(uid, date)
+    const history = await readHabitSettingsForHabit(uid, habitId, date)
     const settings = settingsForDate(habit, history, date)
     if (settings.isArchived) throw new BackendError('failed-precondition', 'Archived habits cannot receive new logs for this date.')
     if (!isScheduledDate(settings.schedule, date)) throw new BackendError('failed-precondition', 'This habit is not scheduled for the selected date.')
     let value = 1
     if (settings.type === 'boolean') {
       if (input.value !== undefined && input.value !== 1) throw new BackendError('validation', 'Boolean habit log value must be 1.')
-      const existing = await readLogsByRange(uid, date, date)
-      if (existing.some((log) => log.habitId === habitId && log.date === date)) {
-        throw new BackendError('already-exists', 'This habit is already completed for the selected date.')
-      }
     } else {
       value = input.value ?? 1
       if (!Number.isFinite(value) || value <= 0 || value > 1_000_000) {
@@ -44,7 +40,9 @@ export function getHabitLogs(startDate: LocalDate, endDate: LocalDate, habitId?:
     validateNonNegativeRange(startDate, endDate)
     if (habitId) validateId(habitId, 'habitId')
     const uid = currentUserId()
-    const logs = await readLogsByRange(uid, startDate, endDate)
+    const logs = habitId
+      ? await readHabitLogsByRange(uid, habitId, startDate, endDate)
+      : await readLogsByRange(uid, startDate, endDate)
     return habitId ? logs.filter((log) => log.habitId === habitId) : logs
   })
 }
@@ -59,8 +57,8 @@ export function getDailyProgress(habitId: string, date?: LocalDate): Promise<{ v
     const habit = await readHabit(uid, habitId)
     if (!habit) throw new BackendError('not-found', 'Habit was not found.')
     const [history, logs] = await Promise.all([
-      readHabitSettingsHistory(uid),
-      readLogsByRange(uid, selectedDate, selectedDate),
+      readHabitSettingsForHabit(uid, habitId, selectedDate),
+      readHabitLogsByRange(uid, habitId, selectedDate, selectedDate),
     ])
     const day = getHabitDay(habit, history, logs, selectedDate)
     return { value: day.value, target: day.target, completed: day.completed }
@@ -72,8 +70,12 @@ export function removeHabitLog(habitId: string, logId: string): Promise<void> {
     validateId(habitId, 'habitId')
     validateId(logId, 'logId')
     const uid = currentUserId()
-    if (!await readHabit(uid, habitId)) throw new BackendError('not-found', 'Habit was not found.')
-    if (!await readHabitLog(uid, habitId, logId)) throw new BackendError('not-found', 'Habit log was not found.')
+    const [habit, log] = await Promise.all([
+      readHabit(uid, habitId),
+      readHabitLog(uid, habitId, logId),
+    ])
+    if (!habit) throw new BackendError('not-found', 'Habit was not found.')
+    if (!log) throw new BackendError('not-found', 'Habit log was not found.')
     await deleteHabitLogRecord(uid, habitId, logId)
   })
 }

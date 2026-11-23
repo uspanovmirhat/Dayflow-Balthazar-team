@@ -3,6 +3,7 @@ import { BackendError } from '../utils/errors'
 import { validateHabitInput } from '../utils/validation'
 import { assertLocalDate } from '../utils/dates'
 import { asRecord, requireStoredDate, requireStoredString, requireStoredTimestamp } from './common.schema'
+import { isHabitColor, stableHabitColor } from '../utils/colors'
 
 function storedSchedule(value: unknown) {
   try {
@@ -46,10 +47,13 @@ export function parseHabit(value: unknown, expectedUid: string, expectedId: stri
   } catch {
     throw new BackendError('failed-precondition', 'Stored habit fields are invalid.')
   }
+  const color = data.color === undefined ? stableHabitColor(id) : data.color
+  if (!isHabitColor(color)) throw new BackendError('failed-precondition', 'Stored habit color is invalid.')
   return {
     id, userId,
     name: requireStoredString(data.name, 'habit.name', 120),
     description: requireStoredString(data.description, 'habit.description', 2000, true),
+    color: color.toUpperCase(),
     type, targetPerDay, schedule: storedSchedule(data.schedule), isArchived, archivedFrom,
     isDeleting,
     settingsVersion: Number(data.settingsVersion),
