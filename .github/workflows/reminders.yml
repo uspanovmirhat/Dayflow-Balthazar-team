@@ -1,0 +1,28 @@
+name: Send reminder notifications
+
+on:
+  schedule:
+    # Every 5 minutes (the minimum GitHub allows). GitHub may start runs a few minutes late.
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: reminders
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --prefix scripts --no-package-lock --no-audit --no-fund
+      - run: node scripts/send-reminders.mjs
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          APP_URL: ${{ vars.APP_URL }}

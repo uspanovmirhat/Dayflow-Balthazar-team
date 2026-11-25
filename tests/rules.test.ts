@@ -392,4 +392,34 @@ describe('Firestore security rules', () => {
     })
     await assertFails(batch.commit())
   })
+  it('accepts reminders with or without a habit/task link and rejects malformed links', async () => {
+    const db = testEnvironment.authenticatedContext('u1').firestore()
+    const reminder = (id: string, link: unknown) => ({
+      id, userId: 'u1', title: 'Вода', description: '', time: '09:00',
+      schedule: { repeat: 'daily', startDate: '2026-11-25', endDate: null }, link,
+      enabled: true, completedAt: null, snoozedUntil: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    })
+    await assertSucceeds(setDoc(doc(db, 'users/u1/reminders/r1'), reminder('r1', null)))
+    await assertSucceeds(setDoc(doc(db, 'users/u1/reminders/r2'), reminder('r2', { kind: 'habit', id: 'h1' })))
+    const legacy: Record<string, unknown> = reminder('r3', null)
+    delete legacy.link
+    await assertSucceeds(setDoc(doc(db, 'users/u1/reminders/r3'), legacy))
+    await assertFails(setDoc(doc(db, 'users/u1/reminders/r4'), reminder('r4', { kind: 'note', id: 'h1' })))
+    await assertFails(setDoc(doc(db, 'users/u1/reminders/r5'), reminder('r5', { kind: 'task', id: 'a/b', extra: true })))
+    await assertFails(setDoc(doc(testEnvironment.authenticatedContext('u2').firestore(), 'users/u1/reminders/r6'), reminder('r6', null)))
+  })
+
+  it('lets only the owner register push devices and keeps the notification log private', async () => {
+    const own = testEnvironment.authenticatedContext('u1').firestore()
+    const other = testEnvironment.authenticatedContext('u2').firestore()
+    const device = { id: 'device0001', userId: 'u1', token: 'fcm-token', userAgent: 'test', createdAt: serverTimestamp(), updatedAt: serverTimestamp() }
+    await assertSucceeds(setDoc(doc(own, 'users/u1/devices/device0001'), device))
+    await assertSucceeds(updateDoc(doc(own, 'users/u1/devices/device0001'), { token: 'rotated', updatedAt: serverTimestamp() }))
+    await assertFails(getDoc(doc(other, 'users/u1/devices/device0001')))
+    await assertFails(setDoc(doc(other, 'users/u1/devices/device0002'), { ...device, id: 'device0002' }))
+    await assertFails(setDoc(doc(own, 'users/u1/devices/device0003'), { ...device, id: 'device0003', extra: 1 }))
+    await assertSucceeds(deleteDoc(doc(own, 'users/u1/devices/device0001')))
+    await assertFails(getDoc(doc(own, 'notificationLog/u1__r1')))
+    await assertFails(setDoc(doc(own, 'notificationLog/u1__r1'), { userId: 'u1' }))
+  })
 })

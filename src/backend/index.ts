@@ -1,11 +1,14 @@
 export {
+  completeGoogleRedirect,
   getCurrentUser,
+  isGoogleAccount,
   login,
   logout,
   register,
   reloadEmailVerificationStatus,
   requestPasswordReset,
   resendEmailVerification,
+  signInWithGoogle,
   subscribeToAuthState,
 } from './services/auth.service'
 export type { RegisterInput, RegisterResult } from './services/auth.service'
@@ -27,7 +30,10 @@ export { calculateHabitAnalytics, calculateTaskAnalytics, rankHabits } from './e
 export { buildCalendarDays } from './engines/calendar.engine'
 export { addDays, assertLocalDate, assertTimeZone, daysBetween, endOfMonth, enumerateDates, isLocalDate, localDateInTimeZone, startOfIsoWeek } from './utils/dates'
 export { isScheduledDate, nextScheduledDate, validateSchedule } from './utils/schedules'
-export { nextReminderOccurrence, reminderOccurrencesBetween, reminderOccursOn, validateReminderSchedule } from './utils/reminders'
+export { dueReminder, localTimeInTimeZone, nextReminderOccurrence, reminderOccurrencesBetween, reminderOccursOn, validateReminderLink, validateReminderSchedule } from './utils/reminders'
+export type { DueReminder } from './utils/reminders'
+export { disablePushNotifications, enableNotifications, forgetDeviceBeforeLogout, getNotificationDevices, getNotificationStatus, refreshPushRegistration, registerAppServiceWorker, showLocalNotification, wasNotificationShown } from './services/notification.service'
+export type { NotificationPermissionState, NotificationStatus } from './services/notification.service'
 export { isHabitColor, randomHabitColor, stableHabitColor, validateHabitColor } from './utils/colors'
 export { BackendError, toBackendError } from './utils/errors'
 export type * from './types'
