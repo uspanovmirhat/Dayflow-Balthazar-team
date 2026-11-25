@@ -36,7 +36,7 @@
 
 Готово, когда: можно создать и отредактировать привычку «Пн, Ср, Пт», в календаре она стоит только в эти дни.
 
-## 3. Экран напоминаний — приоритет средний
+## 3. Экран напоминаний — ✅ сделано (страница «Напоминания», уведомления, см. `docs/notifications-setup.md`)
 
 Сервисы бэкенда уже есть: `getReminders`, `createReminder`, `updateReminder`, `deleteReminder`, `snoozeReminder`, `completeReminder`; утилиты `reminderOccursOn`, `nextReminderOccurrence`. Типы: `Reminder`, `ReminderInput`, `ReminderSchedule` (`repeat`: once / daily / weekdays / weekends / weekly / custom).
 

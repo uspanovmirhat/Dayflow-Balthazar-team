@@ -4,8 +4,13 @@ export type LocalDate = `${number}-${number}-${number}`
 
 export type ReminderRepeat = 'once' | 'daily' | 'weekdays' | 'weekends' | 'weekly' | 'custom'
 export interface ReminderSchedule { repeat: ReminderRepeat; days?: number[]; startDate: LocalDate; endDate: LocalDate | null }
-export interface Reminder { id: string; userId: string; title: string; description: string; time: string; schedule: ReminderSchedule; enabled: boolean; completedAt: Timestamp | null; snoozedUntil: Timestamp | null; createdAt: Timestamp; updatedAt: Timestamp }
-export interface ReminderInput { title: string; description?: string; time: string; schedule: ReminderSchedule; enabled?: boolean }
+/** Optional link to the habit or task the reminder is about. Linked reminders are skipped once that item is done for the day. */
+export interface ReminderLink { kind: 'habit' | 'task'; id: string }
+export interface Reminder { id: string; userId: string; title: string; description: string; time: string; schedule: ReminderSchedule; link: ReminderLink | null; enabled: boolean; completedAt: Timestamp | null; snoozedUntil: Timestamp | null; createdAt: Timestamp; updatedAt: Timestamp }
+export interface ReminderInput { title: string; description?: string; time: string; schedule: ReminderSchedule; link?: ReminderLink | null; enabled?: boolean }
+
+/** A browser/device that receives push notifications for the signed-in user (users/{uid}/devices/{id}). */
+export interface NotificationDevice { id: string; userId: string; token: string; userAgent: string; createdAt: Timestamp; updatedAt: Timestamp }
 
 export type HabitType = 'boolean' | 'count'
 export type HabitSchedule =

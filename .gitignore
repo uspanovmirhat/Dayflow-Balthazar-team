@@ -32,3 +32,5 @@ node_modules/
 .firebase/
 .vs/
 firestore-debug.log
+
+scripts/node_modules

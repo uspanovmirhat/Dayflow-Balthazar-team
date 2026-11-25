@@ -1,10 +1,15 @@
 import {
+  browserPopupRedirectResolver,
   createUserWithEmailAndPassword,
+  getRedirectResult,
+  GoogleAuthProvider,
   onAuthStateChanged,
   reload,
   sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
+  signInWithPopup,
+  signInWithRedirect,
   signOut,
   updateProfile as updateAuthProfile,
   type User,
@@ -99,6 +104,53 @@ export function login(emailValue: string, password: string): Promise<User> {
     await createProfileIfMissing(credential.user, timezone)
     return credential.user
   })
+}
+
+function googleProvider() {
+  const provider = new GoogleAuthProvider()
+  provider.setCustomParameters({ prompt: 'select_account' })
+  return provider
+}
+
+/**
+ * Signs in (or signs up — Firebase creates the account on first use) with a Google account.
+ * Uses a popup; when the browser blocks popups (common in mobile in-app browsers and installed PWAs),
+ * falls back to a full-page redirect and resolves with `null` — the result is picked up by
+ * `completeGoogleRedirect()` after the page reloads.
+ */
+export function signInWithGoogle(): Promise<User | null> {
+  return runBackendOperation(async () => {
+    const { auth } = getFirebaseServices()
+    auth.languageCode = 'ru'
+    try {
+      const credential = await signInWithPopup(auth, googleProvider(), browserPopupRedirectResolver)
+      await createProfileIfMissing(credential.user, supportedTimezoneOrUtc(Intl.DateTimeFormat().resolvedOptions().timeZone))
+      return credential.user
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : ''
+      if (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') {
+        await signInWithRedirect(auth, googleProvider(), browserPopupRedirectResolver)
+        return null
+      }
+      throw error
+    }
+  })
+}
+
+/** Call once on startup: finishes a Google redirect sign-in and creates the profile. Resolves `null` when there was none. */
+export function completeGoogleRedirect(): Promise<User | null> {
+  return runBackendOperation(async () => {
+    const { auth } = getFirebaseServices()
+    const result = await getRedirectResult(auth, browserPopupRedirectResolver)
+    if (!result) return null
+    await createProfileIfMissing(result.user, supportedTimezoneOrUtc(Intl.DateTimeFormat().resolvedOptions().timeZone))
+    return result.user
+  })
+}
+
+/** True when the account signs in with Google (and has no password to manage). */
+export function isGoogleAccount(user: User | null): boolean {
+  return Boolean(user?.providerData.some((provider) => provider.providerId === 'google.com'))
 }
 
 export function logout(): Promise<void> {

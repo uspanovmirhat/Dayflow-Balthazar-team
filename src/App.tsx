@@ -8,11 +8,15 @@ import {
   requestPasswordReset, subscribeToAuthState, updateHabit, updateTask,
   updateUserProfileFields, randomHabitColor, checkPassword, isLocalDate, nextScheduledDate,
   PASSWORD_MAX_LENGTH, PASSWORD_REQUIREMENT_LABELS, reloadEmailVerificationStatus, resendEmailVerification,
+  signInWithGoogle, completeGoogleRedirect, getReminders, createReminder, updateReminder, deleteReminder,
+  dueReminder, nextReminderOccurrence, enableNotifications, disablePushNotifications, getNotificationStatus,
+  refreshPushRegistration, registerAppServiceWorker, showLocalNotification, wasNotificationShown, forgetDeviceBeforeLogout,
 } from './backend'
-import type { CalendarDay, CalendarEvent, CalendarHabitStatus, Habit, HabitAnalytics, HabitInput, HabitLog, HabitSchedule, LocalDate, PasswordCheck, PasswordRequirement, StreakSummary, Task, TaskAnalytics, UserProfile } from './backend'
+import type { CalendarDay, CalendarEvent, CalendarHabitStatus, Habit, HabitAnalytics, HabitInput, HabitLog, HabitSchedule, LocalDate, PasswordCheck, PasswordRequirement, Reminder, ReminderInput, ReminderLink, ReminderRepeat, StreakSummary, Task, TaskAnalytics, UserProfile, NotificationStatus } from './backend'
 import './App.css'
 
-type Page = 'dashboard' | 'habits' | 'tasks' | 'calendar' | 'analytics' | 'profile'
+type Page = 'dashboard' | 'habits' | 'tasks' | 'calendar' | 'reminders' | 'analytics' | 'profile'
+const pages: Page[] = ['dashboard', 'habits', 'tasks', 'calendar', 'reminders', 'analytics', 'profile']
 type Notice = { kind: 'success' | 'error'; text: string } | null
 type DailyHabitProgress = { value: number; target: number; completed: boolean; scheduled?: boolean }
 type CalendarHabitEvent = Extract<CalendarEvent, { kind: 'habit' }>
@@ -20,6 +24,7 @@ type CalendarHabitEvent = Extract<CalendarEvent, { kind: 'habit' }>
 const navItems: { id: Page; label: string; icon: string }[] = [
   { id: 'dashboard', label: 'Обзор', icon: '◫' }, { id: 'habits', label: 'Привычки', icon: '◉' },
   { id: 'tasks', label: 'Задачи', icon: '✓' }, { id: 'calendar', label: 'Календарь', icon: '▦' },
+  { id: 'reminders', label: 'Напоминания', icon: '◔' },
   { id: 'analytics', label: 'Аналитика', icon: '▥' }, { id: 'profile', label: 'Профиль и настройки', icon: '○' },
 ]
 
@@ -69,7 +74,10 @@ function Icon({ children }: { children: ReactNode }) { return <span className="i
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [profile, setProfile] = useState<UserProfile | null>(null)
-  const [page, setPage] = useState<Page>('dashboard')
+  const [page, setPage] = useState<Page>(() => { const requested = new URLSearchParams(window.location.search).get('page') as Page | null; return requested && pages.includes(requested) ? requested : 'dashboard' })
+  const [reminders, setReminders] = useState<Reminder[]>([])
+  const [reminderModal, setReminderModal] = useState<{ reminder: Reminder | null; link?: ReminderLink } | null>(null)
+  const [notificationStatus, setNotificationStatus] = useState<NotificationStatus | null>(null)
   const [habits, setHabits] = useState<Habit[]>([])
   const [habitCompletionOverrides, setHabitCompletionOverrides] = useState<Record<string, DailyHabitProgress>>({})
   const [pendingHabitIds, setPendingHabitIds] = useState<Record<string, boolean>>({})
@@ -181,6 +189,75 @@ function App() {
     } catch (error) { window.setTimeout(() => { if (active) { setNotice({ kind: 'error', text: errorText(error) }); setLoading(false) } }, 0) }
     return () => { active = false; unsubscribe?.() }
   }, [refresh])
+
+  // Finishes a Google sign-in that fell back to a full-page redirect (blocked popup on mobile).
+  useEffect(() => { completeGoogleRedirect().catch((error: unknown) => setNotice({ kind: 'error', text: errorText(error) })) }, [])
+
+  const loadReminders = useCallback(async () => {
+    try { setReminders(await getReminders()) } catch (error) { setNotice({ kind: 'error', text: `Напоминания: ${errorText(error)}` }) }
+  }, [])
+  const updateNotificationStatus = useCallback(async () => { setNotificationStatus(await getNotificationStatus().catch(() => null)) }, [])
+  const uid = user?.uid
+  useEffect(() => {
+    if (!uid) { setReminders([]); return }
+    void loadReminders()
+    void registerAppServiceWorker().then(() => refreshPushRegistration()).then(updateNotificationStatus)
+  }, [uid, loadReminders, updateNotificationStatus])
+
+  // Clicking a notification focuses the open app and asks it to show the reminders page.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return
+    const onMessage = (event: MessageEvent) => { if (event.data?.type === 'dayflow:open') setPage('reminders') }
+    navigator.serviceWorker.addEventListener('message', onMessage)
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage)
+  }, [])
+
+  // Local reminder notifications while the app is open (tab or installed app, also in the background).
+  // Push for a closed app is sent by scripts/send-reminders.mjs with the same keys, so nothing is shown twice.
+  const notifierData = useRef({ reminders, habits, tasks, habitCompletionOverrides, timezone: profile?.timezone })
+  useEffect(() => { notifierData.current = { reminders, habits, tasks, habitCompletionOverrides, timezone: profile?.timezone } })
+  useEffect(() => {
+    if (!uid) return
+    const fired = new Set<string>()
+    const check = async () => {
+      const { reminders: list, habits: habitList, tasks: taskList, habitCompletionOverrides: progress, timezone } = notifierData.current
+      if (!timezone) return
+      for (const reminder of list) {
+        const due = dueReminder(reminder, new Date(), timezone)
+        if (!due || fired.has(due.key)) continue
+        fired.add(due.key)
+        if (reminder.link?.kind === 'habit') {
+          const habit = habitList.find((item) => item.id === reminder.link?.id)
+          if (!habit || habit.isArchived || (!due.snoozed && progress[habit.id]?.completed)) continue
+        }
+        if (reminder.link?.kind === 'task') {
+          const task = taskList.find((item) => item.id === reminder.link?.id)
+          if (!task || task.status === 'completed') continue
+        }
+        if (await wasNotificationShown(due.key)) continue
+        const body = reminderBody(reminder, habitList, taskList)
+        const shown = await showLocalNotification(due.key, reminder.title, body).catch(() => false)
+        if (!shown || document.visibilityState === 'visible') setNotice({ kind: 'success', text: `🔔 ${reminder.title}${body ? ` — ${body}` : ''}` })
+      }
+    }
+    void check()
+    const timer = window.setInterval(() => void check(), 20_000)
+    return () => window.clearInterval(timer)
+  }, [uid])
+
+  const signOut = async () => {
+    try { await forgetDeviceBeforeLogout(); await logout() } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) }
+  }
+  const saveReminder = async (input: ReminderInput) => {
+    try {
+      const editing = reminderModal?.reminder
+      const saved = editing ? await updateReminder(editing.id, input) : await createReminder(input)
+      setReminders((current) => current.some((item) => item.id === saved.id) ? current.map((item) => item.id === saved.id ? saved : item) : [...current, saved])
+      setReminderModal(null)
+      setNotice({ kind: 'success', text: editing ? 'Напоминание обновлено' : 'Напоминание добавлено' })
+      if (!editing && notificationStatus?.permission !== 'granted') setPage('reminders')
+    } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) }
+  }
 
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(null), 4500); return () => window.clearTimeout(timer) }, [notice])
 
@@ -324,7 +401,7 @@ function App() {
       <button className="brand" onClick={() => setPage('dashboard')}><span className="brand-mark">d</span><span>dayflow</span></button>
       <div className="side-caption">МЕНЮ</div>
       <nav>{navItems.map((item) => <button key={item.id} className={`nav-link ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><Icon>{item.icon}</Icon>{item.label}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="sidebar-note"><span>✦</span><strong>Маленькие шаги<br />ведут к большим целям</strong><small>Продолжайте в своём ритме</small></div><button className="nav-link" onClick={async () => { try { await logout() } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }}><Icon>↪</Icon>Выйти</button></div>
+      <div className="sidebar-bottom"><div className="sidebar-note"><span>✦</span><strong>Маленькие шаги<br />ведут к большим целям</strong><small>Продолжайте в своём ритме</small></div><button className="nav-link" onClick={() => void signOut()}><Icon>↪</Icon>Выйти</button></div>
     </aside>
     <main className="main-area">
       <header className="topbar"><button className="mobile-brand" onClick={() => setPage('dashboard')}><span className="brand-mark">d</span>dayflow</button><label className="search-box"><Icon>⌕</Icon><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Найти задачу или привычку..." /></label><button className="primary-icon" aria-label="Добавить" onClick={() => showForm('task')}><span>＋</span></button><button className="avatar" onClick={() => setPage('profile')} title="Профиль">{profile?.displayName?.slice(0, 1).toUpperCase() || 'А'}</button></header>
@@ -335,11 +412,21 @@ function App() {
         {page === 'habits' && <HabitsPage habits={visibleHabits} today={today} streaks={streaks} completionOverrides={habitCompletionOverrides} pendingHabitIds={pendingHabitIds} onAdd={() => showForm('habit')} onToggle={toggleHabit} onEdit={(item) => showForm('habit', item)} onArchive={async (item) => { if (!window.confirm(`Архивировать привычку «${item.name}»?`)) return; try { await archiveHabit(item.id); await afterMutation('Привычка архивирована') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onDelete={async (item) => { if (!window.confirm(`Удалить привычку «${item.name}» вместе с историей?`)) return; try { await deleteHabit(item.id); await afterMutation('Привычка удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
         {page === 'tasks' && <TasksPage tasks={visibleTasks} onAdd={() => showForm('task')} onToggle={toggleTask} onEdit={(item) => showForm('task', item)} onDelete={async (item) => { if (!window.confirm(`Удалить задачу «${item.title}»?`)) return; try { await deleteTask(item.id); await afterMutation('Задача удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
         {page === 'calendar' && <CalendarPage date={calendarDate} today={today} days={calendar} habits={habits} tasks={tasks} loading={calendarLoading} pending={calendarPending} onChange={changeCalendarMonth} onHabitAction={(event, operation) => void changeHabitOnDate(event, operation)} onToggleTask={(task) => void toggleTask(task)} />}
+        {page === 'reminders' && <RemindersPage reminders={reminders} habits={habits} tasks={tasks} today={today} status={notificationStatus}
+          onAdd={(link) => setReminderModal({ reminder: null, link })}
+          onEdit={(reminder) => setReminderModal({ reminder })}
+          onToggle={async (reminder) => { try { const saved = await updateReminder(reminder.id, { enabled: !reminder.enabled }); setReminders((current) => current.map((item) => item.id === saved.id ? saved : item)) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }}
+          onDelete={async (reminder) => { if (!window.confirm(`Удалить напоминание «${reminder.title}»?`)) return; try { await deleteReminder(reminder.id); setReminders((current) => current.filter((item) => item.id !== reminder.id)); setNotice({ kind: 'success', text: 'Напоминание удалено' }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }}
+          onEnable={async () => { try { const result = await enableNotifications(); setNotice({ kind: 'success', text: result.push ? 'Уведомления включены на этом устройстве — даже когда Dayflow закрыт.' : 'Уведомления включены. Они приходят, пока Dayflow открыт (можно в фоне).' }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } finally { await updateNotificationStatus() } }}
+          onDisablePush={async () => { try { await disablePushNotifications(); setNotice({ kind: 'success', text: 'Push-уведомления на этом устройстве отключены.' }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } finally { await updateNotificationStatus() } }}
+          onTest={async () => { const shown = await showLocalNotification(`test:${Date.now()}`, 'Dayflow', 'Так будут выглядеть напоминания 🔔').catch(() => false); if (!shown) setNotice({ kind: 'error', text: 'Сначала разрешите уведомления.' }) }}
+        />}
         {page === 'analytics' && <AnalyticsPage habits={habitAnalytics} tasks={taskAnalytics} completedTasks={completedTasks} />}
-        {page === 'profile' && profile && <ProfilePage profile={profile} emailVerified={emailVerified} onResendVerification={async () => { try { await resendEmailVerification(); setNotice({ kind: 'success', text: `Письмо для подтверждения отправлено на ${profile.email}.` }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onCheckVerification={async () => { try { const verified = await reloadEmailVerificationStatus(); setEmailVerified(verified); setNotice(verified ? { kind: 'success', text: 'Email подтверждён. Спасибо!' } : { kind: 'error', text: 'Подтверждение пока не получено. Проверьте почту и папку «Спам».' }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onSave={async (fields) => { try { const next = await updateUserProfileFields(fields); setProfile(next); await afterMutation('Профиль обновлён') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onLogout={() => void logout()} />}
+        {page === 'profile' && profile && <ProfilePage profile={profile} emailVerified={emailVerified} onResendVerification={async () => { try { await resendEmailVerification(); setNotice({ kind: 'success', text: `Письмо для подтверждения отправлено на ${profile.email}.` }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onCheckVerification={async () => { try { const verified = await reloadEmailVerificationStatus(); setEmailVerified(verified); setNotice(verified ? { kind: 'success', text: 'Email подтверждён. Спасибо!' } : { kind: 'error', text: 'Подтверждение пока не получено. Проверьте почту и папку «Спам».' }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onSave={async (fields) => { try { const next = await updateUserProfileFields(fields); setProfile(next); await afterMutation('Профиль обновлён') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onLogout={() => void signOut()} />}
       </div>
       <nav className="mobile-nav" aria-label="Основная навигация">{navItems.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><Icon>{item.icon}</Icon><span>{item.id === 'profile' ? 'Профиль' : item.label}</span></button>)}</nav>
     </main>
+    {reminderModal && <ReminderModal reminder={reminderModal.reminder} initialLink={reminderModal.link} habits={habits} tasks={tasks} today={today} onClose={() => setReminderModal(null)} onSave={saveReminder} />}
     {modal && <ItemModal kind={modal} habit={editingHabit} task={editingTask} today={today} onClose={() => setModal(null)} onSave={async (data) => {
       try {
         if (modal === 'habit') {
@@ -397,6 +484,11 @@ function AuthScreen({ notice, onNotice }: { notice: Notice; onNotice: (notice: N
     setMode(next); setAttempted(false); setShowPassword(false); onNotice(null)
     setValues((current) => ({ ...current, password: '', confirmPassword: '' }))
   }
+  const google = async () => {
+    onNotice(null); setBusy(true)
+    try { await signInWithGoogle() } catch (error) { onNotice({ kind: 'error', text: errorText(error) }) }
+    finally { setBusy(false) }
+  }
   const submit = async (event: FormEvent) => {
     event.preventDefault(); onNotice(null)
     if (isRegister) {
@@ -419,6 +511,7 @@ function AuthScreen({ notice, onNotice }: { notice: Notice; onNotice: (notice: N
     finally { setBusy(false) }
   }
   return <main className="auth-page"><div className="auth-decoration"><span className="orb orb-one" /><span className="orb orb-two" /><div className="auth-quote"><span>✦ МЫСЛЬ ДНЯ</span><p>«Успех — это сумма небольших усилий, повторяемых изо дня в день».</p><small>Роберт Кольер</small></div></div><section className="auth-panel"><div className="brand auth-brand"><span className="brand-mark">d</span><span>dayflow</span></div><div className="auth-form-wrap"><span className="eyebrow">ВАШЕ ПРОСТРАНСТВО ДЛЯ РОСТА</span><h1>{isRegister ? 'Создайте аккаунт' : mode === 'reset' ? 'Восстановление пароля' : 'С возвращением!'}</h1><p className="muted">{isRegister ? 'Начните путь к своим целям уже сегодня.' : mode === 'reset' ? 'Укажите email, и мы отправим ссылку для сброса.' : 'Войдите, чтобы продолжить свой путь.'}</p>{notice && <div className={`auth-alert ${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.text}</div>}
+    {mode !== 'reset' && <><button type="button" className="button google-button full" disabled={busy} onClick={() => void google()}><GoogleLogo />{isRegister ? 'Зарегистрироваться через Google' : 'Войти через Google'}</button><div className="auth-divider"><span>или по email</span></div></>}
     <form onSubmit={(event) => void submit(event)}>
       {isRegister && <label>Ваше имя<input required minLength={2} maxLength={120} autoComplete="name" value={values.name} onChange={(event) => setField('name')(event.target.value)} placeholder="Анна" aria-invalid={Boolean(nameError) || undefined} />{nameError && <small className="field-error">{nameError}</small>}</label>}
       <label>Email<input required type="email" maxLength={320} autoComplete="email" value={values.email} onChange={(event) => setField('email')(event.target.value)} placeholder="you@example.com" /></label>
@@ -429,6 +522,125 @@ function AuthScreen({ notice, onNotice }: { notice: Notice; onNotice: (notice: N
       <button className="button primary full" disabled={busy}>{busy ? 'Подождите…' : isRegister ? 'Создать аккаунт' : mode === 'reset' ? 'Отправить ссылку' : 'Войти'}<span>→</span></button>
     </form>
     <p className="auth-switch">{mode === 'reset' ? <button className="text-action" onClick={() => switchMode('login')}>← Вернуться ко входу</button> : <>{isRegister ? 'Уже есть аккаунт?' : 'Впервые в Dayflow?'} <button className="text-action" onClick={() => switchMode(isRegister ? 'login' : 'register')}>{isRegister ? 'Войти' : 'Создать аккаунт'}</button></>}</p></div><small className="auth-footer">Ваши цели. Ваш темп. Ваш Dayflow.</small></section></main>
+}
+
+function GoogleLogo() {
+  return <svg className="google-logo" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z" /><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" /><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z" /><path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.6-.4-3.9z" /></svg>
+}
+
+const repeatLabels: Record<ReminderRepeat, string> = { once: 'Один раз', daily: 'Каждый день', weekdays: 'По будням', weekends: 'По выходным', weekly: 'Раз в неделю', custom: 'По дням недели' }
+function reminderRepeatText(reminder: Reminder): string {
+  const { schedule } = reminder
+  if (schedule.repeat === 'custom') return [...(schedule.days ?? [])].sort((a, b) => a - b).map((day) => weekdayShort[day - 1]).join(', ')
+  if (schedule.repeat === 'weekly') return `Раз в неделю, ${weekdayShort[(new Date(`${schedule.startDate}T12:00:00`).getDay() + 6) % 7]}`
+  if (schedule.repeat === 'once') return shortDate(schedule.startDate)
+  return repeatLabels[schedule.repeat]
+}
+function linkedName(link: ReminderLink | null, habits: Habit[], tasks: Task[]): string | null {
+  if (!link) return null
+  return link.kind === 'habit' ? habits.find((item) => item.id === link.id)?.name ?? null : tasks.find((item) => item.id === link.id)?.title ?? null
+}
+function reminderBody(reminder: Reminder, habits: Habit[], tasks: Task[]): string {
+  const name = linkedName(reminder.link, habits, tasks)
+  const prefix = reminder.link && name && name !== reminder.title ? `${reminder.link.kind === 'habit' ? 'Привычка' : 'Задача'}: ${name}` : ''
+  return [prefix, reminder.description].filter(Boolean).join(' · ') || (reminder.link?.kind === 'habit' ? 'Пора выполнить привычку' : reminder.link?.kind === 'task' ? 'Не забудьте про задачу' : '')
+}
+
+function NotificationSettings({ status, onEnable, onDisablePush, onTest }: { status: NotificationStatus | null; onEnable: () => Promise<void>; onDisablePush: () => Promise<void>; onTest: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const run = (action: () => Promise<void>) => async () => { setBusy(true); try { await action() } finally { setBusy(false) } }
+  if (!status) return <section className="card notify-card"><span className="loader small" /> Проверяем уведомления…</section>
+  const granted = status.permission === 'granted'
+  const title = !status.supported ? 'Уведомления недоступны' : !granted ? 'Уведомления выключены' : status.pushEnabled ? '✓ Уведомления включены' : '✓ Уведомления включены, пока Dayflow открыт'
+  const text = !status.supported
+    ? status.needsInstallOnIos ? 'На iPhone и iPad уведомления работают только в установленном приложении: «Поделиться» → «На экран „Домой“», затем откройте Dayflow с экрана «Домой».' : 'Этот браузер не умеет показывать уведомления. Попробуйте Chrome, Edge или Firefox.'
+    : status.permission === 'denied' ? 'Уведомления запрещены в настройках браузера. Нажмите на значок слева от адреса сайта и разрешите уведомления.'
+      : !granted ? 'Разрешите уведомления, чтобы напоминания приходили на этот телефон или компьютер.'
+        : status.pushEnabled ? 'Напоминания приходят на это устройство, даже когда Dayflow закрыт. Включите на каждом устройстве, где вы вошли в аккаунт.'
+          : status.pushAvailable ? 'Сейчас напоминания приходят, пока вкладка или приложение открыты. Включите push, чтобы получать их и при закрытом Dayflow.'
+            : 'Держите Dayflow открытым (можно свернуть) или установите как приложение — и напоминания придут вовремя.'
+  return <section className={`card notify-card ${granted ? 'ok' : ''}`}>
+    <div><strong>{title}</strong><p className="muted">{text}</p></div>
+    <div className="verify-actions">
+      {status.supported && status.permission !== 'denied' && (!granted || (status.pushAvailable && !status.pushEnabled)) && <button className="button primary" type="button" disabled={busy} onClick={run(onEnable)}>{granted ? 'Включить push' : 'Включить уведомления'}</button>}
+      {granted && <button className="button secondary" type="button" disabled={busy} onClick={run(onTest)}>Проверить</button>}
+      {status.pushEnabled && <button className="button secondary" type="button" disabled={busy} onClick={run(onDisablePush)}>Отключить push</button>}
+    </div>
+  </section>
+}
+
+function RemindersPage({ reminders, habits, tasks, today, status, onAdd, onEdit, onToggle, onDelete, onEnable, onDisablePush, onTest }: { reminders: Reminder[]; habits: Habit[]; tasks: Task[]; today: LocalDate; status: NotificationStatus | null; onAdd: (link?: ReminderLink) => void; onEdit: (reminder: Reminder) => void; onToggle: (reminder: Reminder) => Promise<void>; onDelete: (reminder: Reminder) => Promise<void>; onEnable: () => Promise<void>; onDisablePush: () => Promise<void>; onTest: () => Promise<void> }) {
+  const sorted = [...reminders].sort((left, right) => Number(right.enabled) - Number(left.enabled) || left.time.localeCompare(right.time) || left.title.localeCompare(right.title))
+  const linkedIds = new Set(reminders.map((item) => item.link?.id).filter(Boolean))
+  const suggestions = habits.filter((habit) => !habit.isArchived && !linkedIds.has(habit.id)).slice(0, 4)
+  return <>
+    <PageHeading eyebrow="НЕ ЗАБЫВАЙТЕ О ВАЖНОМ" title="Напоминания" subtitle="Уведомления о привычках и задачах на телефоне и компьютере." action={<button className="button primary" onClick={() => onAdd()}>＋ Новое напоминание</button>} />
+    <NotificationSettings status={status} onEnable={onEnable} onDisablePush={onDisablePush} onTest={onTest} />
+    <section className="card list-card reminder-list">
+      {sorted.length ? sorted.map((reminder) => {
+        const next = nextReminderOccurrence(reminder, today)
+        const name = linkedName(reminder.link, habits, tasks)
+        return <div key={reminder.id} className={`reminder-row ${reminder.enabled ? '' : 'is-off'}`}>
+          <span className="reminder-time">{reminder.time}</span>
+          <button className="row-main" onClick={() => onEdit(reminder)}><strong>{reminder.title}</strong><small>{reminderRepeatText(reminder)}{reminder.link && ` · ${reminder.link.kind === 'habit' ? '◉' : '✓'} ${name ?? 'удалено'}`}{reminder.enabled && (next ? ` · следующее ${relativeDay(next, today)}` : ' · больше не повторится')}</small></button>
+          <label className="switch" title={reminder.enabled ? 'Выключить' : 'Включить'}><input type="checkbox" checked={reminder.enabled} onChange={() => void onToggle(reminder)} /><span aria-hidden="true" /><span className="sr-only">{reminder.enabled ? 'Выключить напоминание' : 'Включить напоминание'}</span></label>
+          <button className="icon-button" aria-label={`Удалить напоминание «${reminder.title}»`} onClick={() => void onDelete(reminder)}>×</button>
+        </div>
+      }) : <EmptyState title="Пока нет напоминаний" text="Добавьте напоминание — и Dayflow подскажет, когда пора выполнить привычку или задачу." action="Добавить напоминание" onClick={() => onAdd()} />}
+    </section>
+    {suggestions.length > 0 && <section className="card reminder-suggest"><span className="section-label">БЫСТРО ДОБАВИТЬ</span><div>{suggestions.map((habit) => <button key={habit.id} className="chip" onClick={() => onAdd({ kind: 'habit', id: habit.id })}><i style={{ backgroundColor: habit.color }} />{habit.name}</button>)}</div></section>}
+  </>
+}
+
+function ReminderModal({ reminder, initialLink, habits, tasks, today, onClose, onSave }: { reminder: Reminder | null; initialLink?: ReminderLink; habits: Habit[]; tasks: Task[]; today: LocalDate; onClose: () => void; onSave: (input: ReminderInput) => Promise<void> }) {
+  const startLink = reminder?.link ?? initialLink ?? null
+  const [link, setLink] = useState(startLink ? `${startLink.kind}:${startLink.id}` : '')
+  const nameFor = (value: string) => { const [kind, id] = value.split(':'); return kind === 'habit' ? habits.find((item) => item.id === id)?.name ?? '' : kind === 'task' ? tasks.find((item) => item.id === id)?.title ?? '' : '' }
+  const [title, setTitle] = useState(reminder?.title ?? (startLink ? nameFor(`${startLink.kind}:${startLink.id}`) : ''))
+  const [description, setDescription] = useState(reminder?.description ?? '')
+  const [time, setTime] = useState(reminder?.time ?? '09:00')
+  const linkedTask = link.startsWith('task:') ? tasks.find((item) => `task:${item.id}` === link) : undefined
+  const [repeat, setRepeat] = useState<ReminderRepeat>(reminder?.schedule.repeat ?? (startLink?.kind === 'task' ? 'once' : 'daily'))
+  const [days, setDays] = useState<number[]>(reminder?.schedule.days ?? [1, 3, 5])
+  const [startDate, setStartDate] = useState<LocalDate>(reminder?.schedule.startDate ?? (startLink?.kind === 'task' ? tasks.find((item) => item.id === startLink.id)?.dueDate ?? today : today))
+  const [endDate, setEndDate] = useState<LocalDate | ''>(reminder?.schedule.endDate ?? '')
+  const [busy, setBusy] = useState(false)
+  const activeHabits = habits.filter((habit) => !habit.isArchived)
+  const openTasks = tasks.filter((task) => task.status !== 'completed' || `task:${task.id}` === link)
+  const chooseLink = (value: string) => {
+    const previousName = nameFor(link)
+    setLink(value)
+    if (!title.trim() || title === previousName) setTitle(nameFor(value))
+    const task = value.startsWith('task:') ? tasks.find((item) => `task:${item.id}` === value) : undefined
+    if (task && !reminder) { setRepeat('once'); if (task.dueDate && task.dueDate >= today) setStartDate(task.dueDate) }
+    if (value.startsWith('habit:') && !reminder) setRepeat('daily')
+  }
+  const daysValid = repeat !== 'custom' || days.length > 0
+  const endValid = !endDate || endDate >= startDate
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!daysValid || !endValid) return
+    const [kind, id] = link.split(':')
+    setBusy(true)
+    try {
+      await onSave({
+        title: title.trim(), description: description.trim(), time,
+        link: kind === 'habit' || kind === 'task' ? { kind, id } : null,
+        schedule: { repeat, startDate, endDate: repeat === 'once' ? null : endDate || null, ...(repeat === 'custom' ? { days: [...days].sort((a, b) => a - b) } : {}) },
+      })
+    } finally { setBusy(false) }
+  }
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}><form className="modal" onSubmit={(event) => void submit(event)}>
+    <div className="modal-head"><div><span className="eyebrow">УВЕДОМЛЕНИЕ</span><h2>{reminder ? 'Изменить напоминание' : 'Новое напоминание'}</h2></div><button type="button" className="close-button" onClick={onClose}>×</button></div>
+    <label>О чём напомнить<select value={link} onChange={(e) => chooseLink(e.target.value)}><option value="">Просто напоминание</option>{activeHabits.length > 0 && <optgroup label="Привычки">{activeHabits.map((habit) => <option key={habit.id} value={`habit:${habit.id}`}>{habit.name}</option>)}</optgroup>}{openTasks.length > 0 && <optgroup label="Задачи">{openTasks.map((task) => <option key={task.id} value={`task:${task.id}`}>{task.title}</option>)}</optgroup>}</select>{link && <small className="interval-hint">{link.startsWith('habit') ? 'Если привычка уже выполнена сегодня, напоминание не придёт.' : 'Когда задача выполнена, напоминание больше не приходит.'}</small>}</label>
+    <label>Текст напоминания<input required maxLength={120} autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Например, выпить воды" /></label>
+    <label>Подробности <span className="optional">необязательно</span><textarea maxLength={1000} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Покажем в уведомлении" /></label>
+    <div className="reminder-grid"><label>Время<input required type="time" value={time} onChange={(e) => setTime(e.target.value)} /></label><label>Повторять<select value={repeat} onChange={(e) => setRepeat(e.target.value as ReminderRepeat)}>{(Object.keys(repeatLabels) as ReminderRepeat[]).map((value) => <option key={value} value={value}>{repeatLabels[value]}</option>)}</select></label></div>
+    {repeat === 'custom' && <div className="weekday-chips" role="group" aria-label="Дни недели">{weekdayShort.map((label, index) => { const day = index + 1; const on = days.includes(day); return <button key={day} type="button" className={`chip ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => setDays((current) => on ? current.filter((item) => item !== day) : [...current, day])}>{label}</button> })}{!daysValid && <small className="field-error">Выберите хотя бы один день.</small>}</div>}
+    <div className="reminder-grid"><label>{repeat === 'once' ? 'Дата' : 'Начиная с'}<input required type="date" value={startDate} onChange={(e) => setStartDate(e.target.value as LocalDate)} /></label>{repeat !== 'once' && <label>До <span className="optional">необязательно</span><input type="date" min={startDate} value={endDate} onChange={(e) => setEndDate(e.target.value as LocalDate | '')} />{!endValid && <small className="field-error">Дата окончания раньше начала.</small>}</label>}</div>
+    {linkedTask?.dueDate && repeat === 'once' && startDate !== linkedTask.dueDate && <small className="interval-hint">Срок задачи — {shortDate(linkedTask.dueDate)}.</small>}
+    <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Отмена</button><button className="button primary" disabled={busy}>{busy ? 'Сохранение…' : 'Сохранить'}</button></div>
+  </form></div>
 }
 
 function PageHeading({ eyebrow, title, subtitle, action }: { eyebrow?: string; title: string; subtitle?: string; action?: ReactNode }) { return <div className="page-heading"><div>{eyebrow && <span className="eyebrow">{eyebrow}</span>}<h1>{title}</h1>{subtitle && <p className="muted">{subtitle}</p>}</div>{action}</div> }

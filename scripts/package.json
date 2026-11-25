@@ -1,0 +1,9 @@
+{
+  "name": "dayflow-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Dependencies for scripts/send-reminders.mjs in GitHub Actions (installed with npm install --prefix scripts).",
+  "dependencies": {
+    "firebase-admin": "^14.5.1"
+  }
+}

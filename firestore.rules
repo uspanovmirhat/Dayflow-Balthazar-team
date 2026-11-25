@@ -247,7 +247,7 @@ service cloud.firestore {
 
       match /reminders/{reminderId} {
         function validReminder(data) {
-          return data.keys().hasOnly(['id', 'userId', 'title', 'description', 'time', 'schedule', 'enabled', 'completedAt', 'snoozedUntil', 'createdAt', 'updatedAt']) &&
+          return data.keys().hasOnly(['id', 'userId', 'title', 'description', 'time', 'schedule', 'link', 'enabled', 'completedAt', 'snoozedUntil', 'createdAt', 'updatedAt']) &&
             data.keys().hasAll(['id', 'userId', 'title', 'description', 'time', 'schedule', 'enabled', 'completedAt', 'snoozedUntil', 'createdAt', 'updatedAt']) &&
             data.id == reminderId && data.userId == userId && data.title is string && data.title.size() > 0 && data.title.size() <= 120 &&
             data.description is string && data.description.size() <= 1000 && data.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') && data.enabled is bool &&
@@ -256,11 +256,29 @@ service cloud.firestore {
             (data.schedule.endDate == null || (validDate(data.schedule.endDate) && data.schedule.endDate >= data.schedule.startDate)) &&
             (data.schedule.repeat != 'custom' || (data.schedule.days is list && data.schedule.days.size() > 0 && data.schedule.days.size() <= 7 && data.schedule.days.hasOnly([1,2,3,4,5,6,7]))) &&
             (data.completedAt == null || data.completedAt is timestamp) && (data.snoozedUntil == null || data.snoozedUntil is timestamp) &&
+            (data.get('link', null) == null || (data.link is map && data.link.keys().hasOnly(['kind', 'id']) && data.link.keys().hasAll(['kind', 'id']) &&
+              data.link.kind in ['habit', 'task'] && data.link.id is string && data.link.id.matches('^[A-Za-z0-9_-]{1,128}$'))) &&
             data.createdAt is timestamp && data.updatedAt == request.time;
         }
         allow get, list: if signedInAs(userId);
         allow create: if signedInAs(userId) && validReminder(request.resource.data) && request.resource.data.createdAt == request.time && request.resource.data.completedAt == null && request.resource.data.snoozedUntil == null;
         allow update: if signedInAs(userId) && validReminder(request.resource.data) && request.resource.data.createdAt == resource.data.createdAt && request.resource.data.userId == resource.data.userId;
+        allow delete: if signedInAs(userId);
+      }
+
+      // Browsers that receive push notifications. Read by scripts/send-reminders.mjs through the Admin SDK.
+      match /devices/{deviceId} {
+        function validDevice(data) {
+          return data.keys().hasOnly(['id', 'userId', 'token', 'userAgent', 'createdAt', 'updatedAt']) &&
+            data.keys().hasAll(['id', 'userId', 'token', 'userAgent', 'createdAt', 'updatedAt']) &&
+            data.id == deviceId && data.userId == userId && deviceId.matches('^[A-Za-z0-9_-]{8,64}$') &&
+            data.token is string && data.token.size() > 0 && data.token.size() <= 4096 &&
+            data.userAgent is string && data.userAgent.size() <= 300 &&
+            data.createdAt is timestamp && data.updatedAt == request.time;
+        }
+        allow get, list: if signedInAs(userId);
+        allow create: if signedInAs(userId) && validDevice(request.resource.data) && request.resource.data.createdAt == request.time;
+        allow update: if signedInAs(userId) && validDevice(request.resource.data) && request.resource.data.createdAt == resource.data.createdAt;
         allow delete: if signedInAs(userId);
       }
     }

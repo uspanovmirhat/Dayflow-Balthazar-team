@@ -117,3 +117,51 @@
   .calendar-day .calendar-dots i { width: 5px; height: 5px; }
   .verify-card { padding: 17px; }
 }
+
+/* Google sign-in */
+.google-button { width: 100%; margin: 4px 0 0; border: 1px solid #dce6ed; background: white; color: #435263; }
+.google-button:hover:not(:disabled) { background: #f7fafc; }
+.google-logo { width: 18px; height: 18px; flex: 0 0 auto; }
+.auth-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 6px; color: #a1abb4; font-size: 11px; }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: #e6ebef; }
+
+/* Reminders */
+.notify-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 22px; padding: 18px 25px; border-color: #f0e2c8; background: #fffcf6; }
+.notify-card.ok { border-color: #d6e7dc; background: #f8fcf9; }
+.notify-card > div:first-child { flex: 1 1 320px; min-width: 0; }
+.notify-card strong { color: var(--ink); font-size: 14px; }
+.notify-card p { margin-top: 4px; font-size: 12px; }
+.reminder-list { padding-top: 10px; padding-bottom: 10px; }
+.reminder-row { display: flex; align-items: center; gap: 14px; padding: 13px 0; border-bottom: 1px solid #eef2f5; }
+.reminder-row:last-child { border-bottom: 0; }
+.reminder-row.is-off { opacity: .55; }
+.reminder-row .row-main { flex: 1; min-width: 0; }
+.reminder-row .row-main small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reminder-time { flex: 0 0 auto; min-width: 58px; padding: 7px 9px; border-radius: 10px; color: #5f84a5; background: #eef4f9; font: 800 14px Manrope, sans-serif; text-align: center; }
+.icon-button { flex: 0 0 auto; width: 30px; height: 30px; border: 0; border-radius: 9px; color: #9aa6b0; background: transparent; font-size: 20px; }
+.icon-button:hover { color: #c06b6b; background: #fbf1f1; }
+.switch { position: relative; flex: 0 0 auto; display: inline-block; width: 40px; height: 23px; cursor: pointer; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.switch span[aria-hidden] { position: absolute; inset: 0; border-radius: 23px; background: #dbe3ea; transition: .18s; }
+.switch span[aria-hidden]::after { content: ''; position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgba(0,0,0,.15); transition: .18s; }
+.switch input:checked + span[aria-hidden] { background: #8eacc7; }
+.switch input:checked + span[aria-hidden]::after { transform: translateX(17px); }
+.switch input:focus-visible + span[aria-hidden] { outline: 2px solid #7196b5; outline-offset: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.reminder-suggest { padding: 18px 25px; }
+.reminder-suggest > div { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 13px; border: 1px solid #dce6ed; border-radius: 17px; color: #5d6f80; background: white; font-size: 12px; font-weight: 700; }
+.chip i { width: 9px; height: 9px; border-radius: 50%; }
+.chip.on { border-color: #8eacc7; color: white; background: #8eacc7; }
+.weekday-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.weekday-chips .chip { min-width: 42px; justify-content: center; padding: 0 8px; }
+.weekday-chips .field-error { flex-basis: 100%; }
+.reminder-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.mobile-nav span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 480px) {
+  .notify-card, .reminder-suggest { padding: 17px; }
+  .notify-card .verify-actions { width: 100%; }
+  .reminder-row { gap: 10px; }
+  .reminder-time { min-width: 52px; padding: 6px 7px; font-size: 13px; }
+  .reminder-grid { grid-template-columns: 1fr; }
+}
