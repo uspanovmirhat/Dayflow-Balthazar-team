@@ -16,7 +16,7 @@ repositories ←→ Firebase Client SDK
 pure engines       Firestore Rules
 ```
 
-The Firebase configuration module initializes lazily when a backend function needs Firebase. Current React source does not yet import the backend entry point; this guide describes the integration surface for Aruna's frontend work.
+The Firebase configuration module initializes lazily when a backend function needs Firebase. The React app imports everything from the backend entry point `src/backend/index.ts`; this guide describes that integration surface for Aruna's frontend work.
 
 ## Backend module map
 
@@ -62,7 +62,22 @@ return unsubscribe
 
 ## Authentication and profile
 
-Available functions are `register(input)`, `login(email, password)`, `logout()`, `getCurrentUser()`, `subscribeToAuthState(callback, onError?)`, and `requestPasswordReset(email)`. `RegisterInput` is exported and requires `email`, `password`, `displayName`, with optional `timezone`. Passwords are never written to Firestore.
+Available functions are `register(input)`, `login(email, password)`, `logout()`, `getCurrentUser()`, `subscribeToAuthState(callback, onError?)`, `requestPasswordReset(email)`, `resendEmailVerification()`, and `reloadEmailVerificationStatus()`. Passwords are never written to Firestore.
+
+`RegisterInput` requires `email`, `password`, `confirmPassword`, and `displayName`, with optional `timezone`. The backend rejects the request before contacting Firebase when `confirmPassword !== password`, when the display name is shorter than 2 characters, or when the password fails the policy. `register` resolves to `RegisterResult = { user, verificationEmailSent }` (not a bare `User`): after the account is created a verification email is sent; if that email fails, the account still exists and `verificationEmailSent` is `false`.
+
+Password policy (`src/backend/utils/passwords.ts`): 8–128 characters, at least one letter, at least one digit, no leading/trailing spaces. Use `checkPassword(password)` for live form feedback; it returns `{ valid, missing: PasswordRequirement[], score: 0–4 }`, and `PASSWORD_REQUIREMENT_LABELS` maps each requirement to Russian UI text. Do not duplicate these rules in the UI.
+
+Firebase Auth errors are normalized to `BackendError` with Russian, user-facing messages (for example `auth/email-already-in-use` → «Аккаунт с таким email уже существует…», `auth/invalid-credential` → «Неверный email или пароль.»), so `error.message` can be shown directly on the sign-in screen.
+
+`user.emailVerified` from Firebase Auth does not update by itself after the user clicks the link in another tab; call `reloadEmailVerificationStatus()` (resolves to the fresh boolean) when the user says they have confirmed. `resendEmailVerification()` fails with `failed-precondition` when the email is already verified.
+
+```ts
+import { checkPassword, register } from '../backend'
+
+const check = checkPassword(password) // { valid, missing, score }
+const { user, verificationEmailSent } = await register({ displayName, email, password, confirmPassword })
+```
 
 ```ts
 import { getUserProfile, login, logout } from '../backend'
@@ -96,15 +111,26 @@ await updateHabit(habit.id, { ...input, name: 'Read each evening' })
 
 `HabitInput` requires `name`, `type`, `targetPerDay`, and `schedule`; `description` is optional. Types are `'boolean' | 'count'`. Boolean target must be `1`; count target and log values are positive and capped at 1,000,000. Schedule variants are `{ type: 'daily' }`, `{ type: 'weekdays', days: number[] }` (ISO Monday=1 through Sunday=7), and `{ type: 'interval', everyNDays: number, startDate: LocalDate }`.
 
-Habit settings history is effective-dated. Creation is effective today in the profile timezone; updates and archive/restore take effect the next local day. Habit type is immutable. `deleteHabit` permanently removes the habit, its logs, and settings history; choose archive when history must be preserved.
+Habit settings history is effective-dated. Creation is effective today in the profile timezone; updates and archive/restore take effect the next local day.
+
+Interval schedules count every `everyNDays` days from `startDate` (the cycle anchor). The backend honours the requested `startDate` when it lies in this window, otherwise it falls back:
+
+| Call | Accepted `startDate` | Fallback |
+| --- | --- | --- |
+| `createHabit` | today … today + 365 | today |
+| `updateHabit` | tomorrow … today + 365 | the existing anchor when the habit already had an interval, else tomorrow |
+
+To keep the current rhythm when editing an interval habit, send `nextScheduledDate(habit.schedule, tomorrow)` as `startDate` (this is what the habit form does). `nextScheduledDate(schedule, from)` returns the first due date on or after `from` for any schedule type and is the way to show «следующий раз …» on rest days. Habit type is immutable. `deleteHabit` permanently removes the habit, its logs, and settings history; choose archive when history must be preserved.
 
 ```ts
 import { addHabitLog, getDailyProgress, getHabitLogs } from '../backend'
 
 const log = await addHabitLog(habit.id) // today by default
-const progress = await getDailyProgress(habit.id)
+const progress = await getDailyProgress(habit.id) // { value, target, completed, scheduled }
 const history = await getHabitLogs('2026-11-01', '2026-11-30', habit.id)
 ```
+
+`getDailyProgress` also returns `scheduled`: `false` means the date is a rest day for that habit (for example between interval occurrences); disable the completion control instead of calling `addHabitLog`, which would fail with «В этот день привычка не запланирована…».
 
 Dates are local calendar strings (`LocalDate`, `YYYY-MM-DD`), not JavaScript timestamps. Future dates are rejected for logs/progress. A selected date must be scheduled and not archived. Boolean logs are unique per habit/date and use that date as the document ID; count logs are separate events whose values sum toward the effective target. `removeHabitLog(habitId, logId)` deletes one owner's log.
 
@@ -142,7 +168,7 @@ const rankings = await getHabitRankings('2026-11-01', '2026-11-06')
 
 Other exports include `getCalendarEvents(start, end)`, `getCalendarEventsForDay(date)`, `getCalendarEventsForWeek(date)`, `getCalendarEventsForMonth(date)`, `getHabitAnalytics(start, end)`, `getMonthlyHabitAnalytics(date?)`, `getTaskAnalytics(start, end, today?)`, and `getDashboardSummary(date?)`.
 
-Calendar returns `CalendarDay[]`, including empty day buckets, with discriminated `habit` and `task` events. Weeks begin Monday. Streaks count consecutive scheduled days; unscheduled dates are skipped, missed scheduled historical days break a run, and an incomplete current day remains pending. Count habits complete when the sum for the date reaches that date's historical target. Analytics derive from logs and history; no aggregate collection is maintained. Analytics and dashboard reject unsupported future dates, though calendar can represent a requested date range without applying that future-date restriction.
+Calendar returns `CalendarDay[]`, including empty day buckets, with discriminated `habit`, `task`, and `reminder` events. A single request may cover at most 400 days. Habit events include `habitType` (`'boolean' | 'count'`) and `status: CalendarHabitStatus`, computed against today in the profile timezone: `completed`, `missed` (past due day without completion), `pending` (due today, not done yet), or `upcoming` (future due day). Interval habits appear only on due days; habits that are being deleted are omitted. Past and today's habit events can be marked from the calendar with `addHabitLog(habitId, { date })` and undone with `getHabitLogs(date, date, habitId)` + `removeHabitLog`. The `reminder` event kind is declared in the types, but `getCalendarEvents` does not emit reminders yet. Weeks begin Monday. Streaks count consecutive scheduled days; unscheduled dates are skipped, missed scheduled historical days break a run, and an incomplete current day remains pending. Count habits complete when the sum for the date reaches that date's historical target. Analytics derive from logs and history; no aggregate collection is maintained. Analytics and dashboard reject unsupported future dates, though calendar can represent a requested date range without applying that future-date restriction.
 
 ## Loading, errors, and empty states
 
@@ -204,13 +230,13 @@ The latest handoff status recorded for this backend is:
 - Cleanup: successful; test habit and related log/history documents were removed, with no leftovers.
 - Firestore SDK emitted `BloomFilterError: Invalid hash count: 0` warnings during the cloud run. They did not affect test outcomes; investigate if they recur or begin correlating with request failures.
 
-These are recorded results from the latest reported run, not a claim that this documentation-only change reran those checks.
+These are recorded results from an earlier run. On 2026-11-25 (sign-up confirmation + interval calendar change) build, lint, 92 unit tests, and 16 Firestore Rules tests passed locally, and sign-up and calendar marking were checked in a browser against the Auth/Firestore emulators.
 
 ## Known limits
 
 - There is no trusted server or Admin SDK. Client Rules are the security boundary; highly authoritative time/business policies would require trusted server logic.
 - Local dates follow the profile timezone. Existing log dates are not recalculated if timezone changes.
-- Backend exports are available, but the current React application has not yet been connected to them.
+- The React application (`src/App.tsx`) is connected to the backend. See `docs/FRONTEND_TASKS.md` for the open frontend work.
 - Analytics read source logs/history and may become expensive over long histories; no materialized aggregate data is stored.
 - `deleteHabit` and `deleteTask` are permanent and explicitly remove their subcollections because Firestore does not cascade deletes.
 - Firebase configuration must be present for service calls; local emulator configuration should be used for Rules tests.
