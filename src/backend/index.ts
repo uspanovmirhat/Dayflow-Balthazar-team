@@ -3,10 +3,14 @@ export {
   login,
   logout,
   register,
+  reloadEmailVerificationStatus,
   requestPasswordReset,
+  resendEmailVerification,
   subscribeToAuthState,
 } from './services/auth.service'
-export type { RegisterInput } from './services/auth.service'
+export type { RegisterInput, RegisterResult } from './services/auth.service'
+export { assertValidPassword, checkPassword, PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH, PASSWORD_REQUIREMENT_LABELS } from './utils/passwords'
+export type { PasswordCheck, PasswordRequirement } from './utils/passwords'
 
 export { getUserProfile, profileExists, updateUserProfileFields } from './services/user.service'
 export { archiveHabit, createHabit, deleteHabit, getHabit, getHabitStreak, getHabits, restoreHabit, updateHabit } from './services/habit.service'
@@ -22,7 +26,7 @@ export { calculateStreakSummary, getHabitDay, getHabitDayResult, getScheduledHab
 export { calculateHabitAnalytics, calculateTaskAnalytics, rankHabits } from './engines/analytics.engine'
 export { buildCalendarDays } from './engines/calendar.engine'
 export { addDays, assertLocalDate, assertTimeZone, daysBetween, endOfMonth, enumerateDates, isLocalDate, localDateInTimeZone, startOfIsoWeek } from './utils/dates'
-export { isScheduledDate, validateSchedule } from './utils/schedules'
+export { isScheduledDate, nextScheduledDate, validateSchedule } from './utils/schedules'
 export { nextReminderOccurrence, reminderOccurrencesBetween, reminderOccursOn, validateReminderSchedule } from './utils/reminders'
 export { isHabitColor, randomHabitColor, stableHabitColor, validateHabitColor } from './utils/colors'
 export { BackendError, toBackendError } from './utils/errors'

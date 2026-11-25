@@ -124,9 +124,9 @@ describe('habit log service', () => {
     mocks.readHabit.mockResolvedValue({ ...habit, type: 'count' })
     mocks.readHabitSettingsForHabit.mockResolvedValue([{ ...settings, type: 'count', targetPerDay: 3 }])
     mocks.readHabitLogsByRange.mockResolvedValue(logs)
-    mocks.getHabitDay.mockReturnValue({ value: 2, target: 3, completed: false })
+    mocks.getHabitDay.mockReturnValue({ scheduled: true, value: 2, target: 3, completed: false })
 
-    await expect(getDailyProgress('h1')).resolves.toEqual({ value: 2, target: 3, completed: false })
+    await expect(getDailyProgress('h1')).resolves.toEqual({ value: 2, target: 3, completed: false, scheduled: true })
     expect(mocks.readHabitLogsByRange).toHaveBeenCalledWith('u1', 'h1', '2026-11-05', '2026-11-05')
     expect(mocks.getHabitDay).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), logs, '2026-11-05')
   })

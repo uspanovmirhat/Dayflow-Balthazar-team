@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { isScheduledDate, isValidTimezone, validateSchedule } from './schedules'
+import { isScheduledDate, isValidTimezone, nextScheduledDate, validateSchedule } from './schedules'
 
 describe('habit schedules', () => {
+  it('finds the next due date for every schedule type', () => {
+    expect(nextScheduledDate({ type: 'daily' }, '2026-11-05')).toBe('2026-11-05')
+    expect(nextScheduledDate({ type: 'weekdays', days: [1] }, '2026-11-05')).toBe('2026-11-09')
+    expect(nextScheduledDate({ type: 'weekdays', days: [4] }, '2026-11-05')).toBe('2026-11-05')
+    const interval = { type: 'interval' as const, everyNDays: 3, startDate: '2026-11-29' as const }
+    expect(nextScheduledDate(interval, '2026-11-01')).toBe('2026-11-29')
+    expect(nextScheduledDate(interval, '2026-11-29')).toBe('2026-11-29')
+    expect(nextScheduledDate(interval, '2026-11-30')).toBe('2026-12-02')
+    expect(nextScheduledDate(interval, '2026-12-31')).toBe('2027-01-01')
+    expect(isScheduledDate(interval, nextScheduledDate(interval, '2027-03-15'))).toBe(true)
+  })
+
   it('handles daily schedules', () => {
     expect(isScheduledDate({ type: 'daily' }, '2026-11-05')).toBe(true)
   })

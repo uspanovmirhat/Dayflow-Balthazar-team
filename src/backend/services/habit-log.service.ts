@@ -14,14 +14,14 @@ export function addHabitLog(habitId: string, input: { value?: number; date?: Loc
     const { uid, today } = await currentUserContext()
     const date = input.date ?? today
     assertLocalDate(date)
-    if (date > today) throw new BackendError('validation', 'Habit logs cannot be added for future dates.')
+    if (date > today) throw new BackendError('validation', 'Нельзя отметить привычку на будущую дату.')
     const habit = await readHabit(uid, habitId)
     if (!habit) throw new BackendError('not-found', 'Habit was not found.')
     if (habit.isDeleting) throw new BackendError('failed-precondition', 'A habit being deleted cannot receive new logs.')
     const history = await readHabitSettingsForHabit(uid, habitId, date)
     const settings = settingsForDate(habit, history, date)
-    if (settings.isArchived) throw new BackendError('failed-precondition', 'Archived habits cannot receive new logs for this date.')
-    if (!isScheduledDate(settings.schedule, date)) throw new BackendError('failed-precondition', 'This habit is not scheduled for the selected date.')
+    if (settings.isArchived) throw new BackendError('failed-precondition', 'Привычка в архиве — отметки для этой даты недоступны.')
+    if (!isScheduledDate(settings.schedule, date)) throw new BackendError('failed-precondition', 'В этот день привычка не запланирована — по расписанию это день отдыха.')
     let value = 1
     if (settings.type === 'boolean') {
       if (input.value !== undefined && input.value !== 1) throw new BackendError('validation', 'Boolean habit log value must be 1.')
@@ -47,7 +47,7 @@ export function getHabitLogs(startDate: LocalDate, endDate: LocalDate, habitId?:
   })
 }
 
-export function getDailyProgress(habitId: string, date?: LocalDate): Promise<{ value: number; target: number; completed: boolean }> {
+export function getDailyProgress(habitId: string, date?: LocalDate): Promise<{ value: number; target: number; completed: boolean; scheduled: boolean }> {
   return runBackendOperation(async () => {
     validateId(habitId, 'habitId')
     const { uid, today } = await currentUserContext()
@@ -61,7 +61,7 @@ export function getDailyProgress(habitId: string, date?: LocalDate): Promise<{ v
       readHabitLogsByRange(uid, habitId, selectedDate, selectedDate),
     ])
     const day = getHabitDay(habit, history, logs, selectedDate)
-    return { value: day.value, target: day.target, completed: day.completed }
+    return { value: day.value, target: day.target, completed: day.completed, scheduled: day.scheduled }
   })
 }
 

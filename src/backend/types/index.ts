@@ -125,8 +125,11 @@ export interface TaskAnalytics {
   completedOverTime: Array<{ date: LocalDate; count: number }>
 }
 
+/** completed: done; missed: past due day without completion; pending: due today; upcoming: future due day. */
+export type CalendarHabitStatus = 'completed' | 'missed' | 'pending' | 'upcoming'
+
 export type CalendarEvent =
-  | { kind: 'habit'; id: string; habitId: string; title: string; date: LocalDate; color: string; completed: boolean; value: number; target: number }
+  | { kind: 'habit'; id: string; habitId: string; title: string; date: LocalDate; color: string; habitType: HabitType; status: CalendarHabitStatus; completed: boolean; value: number; target: number }
   | { kind: 'task'; id: string; title: string; date: LocalDate; status: TaskStatus; priority: TaskPriority }
   | { kind: 'reminder'; id: string; reminderId: string; title: string; date: LocalDate; time: string; description: string; repeat: ReminderRepeat }
 

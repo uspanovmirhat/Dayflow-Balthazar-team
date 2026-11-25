@@ -375,7 +375,7 @@ describe('Firestore security rules', () => {
       status: 'completed', completedAt: serverTimestamp(), updatedAt: serverTimestamp(), statusVersion: 2,
     })
     batch.set(doc(db, 'users/u1/tasks/t1/statusHistory/2'), {
-      id: '2', userId: 'u1', taskId: 't1', status: 'completed', date: '2026-11-05', version: 2, changedAt: serverTimestamp(),
+      id: '2', userId: 'u1', taskId: 't1', status: 'completed', date: new Date().toISOString().slice(0, 10), version: 2, changedAt: serverTimestamp(),
     })
     await assertSucceeds(batch.commit())
   })

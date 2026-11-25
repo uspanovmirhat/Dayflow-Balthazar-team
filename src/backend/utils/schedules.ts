@@ -1,5 +1,5 @@
 import { BackendError } from './errors'
-import { assertLocalDate, daysBetween, isoWeekday, isLocalDate } from './dates'
+import { addDays, assertLocalDate, daysBetween, isoWeekday, isLocalDate } from './dates'
 import type { HabitSchedule, LocalDate } from '../types'
 
 export function validateSchedule(value: unknown): asserts value is HabitSchedule {
@@ -43,6 +43,23 @@ export function isScheduledDate(schedule: HabitSchedule, date: LocalDate): boole
   if (schedule.type === 'weekdays') return schedule.days.includes(isoWeekday(date))
   if (date < schedule.startDate) return false
   return daysBetween(schedule.startDate, date) % schedule.everyNDays === 0
+}
+
+/** First date on or after `from` when the schedule is due. Interval schedules are computed arithmetically. */
+export function nextScheduledDate(schedule: HabitSchedule, from: LocalDate): LocalDate {
+  assertLocalDate(from, 'from')
+  validateSchedule(schedule)
+  if (schedule.type === 'daily') return from
+  if (schedule.type === 'interval') {
+    if (from <= schedule.startDate) return schedule.startDate
+    const remainder = daysBetween(schedule.startDate, from) % schedule.everyNDays
+    return remainder === 0 ? from : addDays(from, schedule.everyNDays - remainder)
+  }
+  for (let offset = 0; offset < 7; offset += 1) {
+    const date = addDays(from, offset)
+    if (schedule.days.includes(isoWeekday(date))) return date
+  }
+  throw new BackendError('validation', 'Weekday schedules need at least one day.')
 }
 
 export function isValidTimezone(value: unknown): value is string {

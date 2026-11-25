@@ -18,13 +18,26 @@ export interface HabitInput {
   color?: string
 }
 
+/** How far ahead an interval cycle may be scheduled to begin. */
+const MAX_INTERVAL_START_OFFSET_DAYS = 365
+
+/**
+ * Interval habits count their cycle from `startDate`. A requested start date is honoured when it lies
+ * between `earliest` (today for new habits, tomorrow for edits, since edits apply from tomorrow) and one
+ * year ahead. Anything else falls back to `fallback`, so a stale or past date can never rewrite history.
+ */
+function chooseIntervalStart(requested: LocalDate, earliest: LocalDate, fallback: LocalDate, today: LocalDate = earliest): LocalDate {
+  const latest = addDays(today, MAX_INTERVAL_START_OFFSET_DAYS)
+  return requested >= earliest && requested <= latest ? requested : fallback
+}
+
 export function createHabit(input: HabitInput): Promise<Habit> {
   return runBackendOperation(async () => {
     validateHabitInput(input)
     if (input.color !== undefined) validateHabitColor(input.color)
     const { uid, today } = await currentUserContext()
     const schedule = input.schedule.type === 'interval'
-      ? { ...input.schedule, startDate: today }
+      ? { ...input.schedule, startDate: chooseIntervalStart(input.schedule.startDate, today, today) }
       : input.schedule
     return createHabitRecord(uid, {
       name: input.name.trim(), description: input.description?.trim() ?? '',
@@ -60,17 +73,23 @@ export function updateHabit(habitId: string, input: HabitInput): Promise<Habit> 
     if (!existing) throw new BackendError('not-found', 'Habit was not found.')
     if (existing.isDeleting) throw new BackendError('failed-precondition', 'A habit being deleted cannot be updated.')
     if (existing.type !== input.type) throw new BackendError('failed-precondition', 'Habit type is immutable. Create a new habit to change between boolean and count.')
+    const effectiveFrom = addDays(today, 1)
     const schedule = input.schedule.type === 'interval'
       ? {
           ...input.schedule,
-          startDate: existing.schedule.type === 'interval' ? existing.schedule.startDate : addDays(today, 1),
+          startDate: chooseIntervalStart(
+            input.schedule.startDate,
+            effectiveFrom,
+            existing.schedule.type === 'interval' ? existing.schedule.startDate : effectiveFrom,
+            today,
+          ),
         }
       : input.schedule
     return updateHabitSettings(uid, habitId, {
       name: input.name.trim(), description: input.description?.trim() ?? '',
       type: input.type, targetPerDay: input.targetPerDay, schedule,
       color: input.color?.toUpperCase() ?? existing.color,
-      effectiveFrom: addDays(today, 1),
+      effectiveFrom,
     })
   })
 }
