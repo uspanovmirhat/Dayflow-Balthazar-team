@@ -2,6 +2,11 @@ import type { Timestamp } from 'firebase/firestore'
 
 export type LocalDate = `${number}-${number}-${number}`
 
+export type ReminderRepeat = 'once' | 'daily' | 'weekdays' | 'weekends' | 'weekly' | 'custom'
+export interface ReminderSchedule { repeat: ReminderRepeat; days?: number[]; startDate: LocalDate; endDate: LocalDate | null }
+export interface Reminder { id: string; userId: string; title: string; description: string; time: string; schedule: ReminderSchedule; enabled: boolean; completedAt: Timestamp | null; snoozedUntil: Timestamp | null; createdAt: Timestamp; updatedAt: Timestamp }
+export interface ReminderInput { title: string; description?: string; time: string; schedule: ReminderSchedule; enabled?: boolean }
+
 export type HabitType = 'boolean' | 'count'
 export type HabitSchedule =
   | { type: 'daily' }
@@ -123,6 +128,7 @@ export interface TaskAnalytics {
 export type CalendarEvent =
   | { kind: 'habit'; id: string; habitId: string; title: string; date: LocalDate; color: string; completed: boolean; value: number; target: number }
   | { kind: 'task'; id: string; title: string; date: LocalDate; status: TaskStatus; priority: TaskPriority }
+  | { kind: 'reminder'; id: string; reminderId: string; title: string; date: LocalDate; time: string; description: string; repeat: ReminderRepeat }
 
 export interface CalendarDay {
   date: LocalDate

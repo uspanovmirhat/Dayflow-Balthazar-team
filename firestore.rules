@@ -244,6 +244,25 @@ service cloud.firestore {
           allow delete: if signedInAs(userId) && get(/databases/$(database)/documents/users/$(userId)/tasks/$(taskId)).data.get('isDeleting', false) == true;
         }
       }
+
+      match /reminders/{reminderId} {
+        function validReminder(data) {
+          return data.keys().hasOnly(['id', 'userId', 'title', 'description', 'time', 'schedule', 'enabled', 'completedAt', 'snoozedUntil', 'createdAt', 'updatedAt']) &&
+            data.keys().hasAll(['id', 'userId', 'title', 'description', 'time', 'schedule', 'enabled', 'completedAt', 'snoozedUntil', 'createdAt', 'updatedAt']) &&
+            data.id == reminderId && data.userId == userId && data.title is string && data.title.size() > 0 && data.title.size() <= 120 &&
+            data.description is string && data.description.size() <= 1000 && data.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') && data.enabled is bool &&
+            data.schedule is map && data.schedule.keys().hasOnly(['repeat', 'days', 'startDate', 'endDate']) && data.schedule.keys().hasAll(['repeat', 'startDate', 'endDate']) &&
+            data.schedule.repeat in ['once', 'daily', 'weekdays', 'weekends', 'weekly', 'custom'] && validDate(data.schedule.startDate) &&
+            (data.schedule.endDate == null || (validDate(data.schedule.endDate) && data.schedule.endDate >= data.schedule.startDate)) &&
+            (data.schedule.repeat != 'custom' || (data.schedule.days is list && data.schedule.days.size() > 0 && data.schedule.days.size() <= 7 && data.schedule.days.hasOnly([1,2,3,4,5,6,7]))) &&
+            (data.completedAt == null || data.completedAt is timestamp) && (data.snoozedUntil == null || data.snoozedUntil is timestamp) &&
+            data.createdAt is timestamp && data.updatedAt == request.time;
+        }
+        allow get, list: if signedInAs(userId);
+        allow create: if signedInAs(userId) && validReminder(request.resource.data) && request.resource.data.createdAt == request.time && request.resource.data.completedAt == null && request.resource.data.snoozedUntil == null;
+        allow update: if signedInAs(userId) && validReminder(request.resource.data) && request.resource.data.createdAt == resource.data.createdAt && request.resource.data.userId == resource.data.userId;
+        allow delete: if signedInAs(userId);
+      }
     }
 
     match /{path=**}/logs/{logId} {
