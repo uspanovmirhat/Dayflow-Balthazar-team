@@ -71,6 +71,25 @@ describe('habit service CRUD', () => {
     }))
   })
 
+  it('lets a new interval start on a chosen future date, but never in the past or over a year ahead', async () => {
+    await createHabit({ name: 'Walk', type: 'boolean', targetPerDay: 1, schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-10' } })
+    expect(mocks.createHabitRecord).toHaveBeenLastCalledWith('u1', expect.objectContaining({
+      schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-10' }, effectiveFrom: '2026-11-05',
+    }))
+    await createHabit({ name: 'Walk', type: 'boolean', targetPerDay: 1, schedule: { type: 'interval', everyNDays: 3, startDate: '2028-01-01' } })
+    expect(mocks.createHabitRecord).toHaveBeenLastCalledWith('u1', expect.objectContaining({
+      schedule: { type: 'interval', everyNDays: 3, startDate: '2026-11-05' },
+    }))
+  })
+
+  it('restarts an existing interval cycle from a chosen date not earlier than tomorrow', async () => {
+    mocks.readHabit.mockResolvedValue({ ...habit, schedule: { type: 'interval', everyNDays: 2, startDate: '2026-10-01' } })
+    await updateHabit('h1', { name: 'Read', type: 'boolean', targetPerDay: 1, schedule: { type: 'interval', everyNDays: 4, startDate: '2026-11-08' } })
+    expect(mocks.updateHabitSettings).toHaveBeenLastCalledWith('u1', 'h1', expect.objectContaining({
+      schedule: { type: 'interval', everyNDays: 4, startDate: '2026-11-08' }, effectiveFrom: '2026-11-06',
+    }))
+  })
+
   it('updates settings effective next local day and rejects type changes', async () => {
     await updateHabit('h1', { name: 'Read more', type: 'boolean', targetPerDay: 1, schedule: { type: 'daily' } })
     expect(mocks.updateHabitSettings).toHaveBeenCalledWith('u1', 'h1', expect.objectContaining({ effectiveFrom: '2026-11-06' }))

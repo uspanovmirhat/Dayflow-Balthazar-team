@@ -28,3 +28,7 @@ node_modules/
 .env.*
 !.env.example
 .env.local
+# Firebase deploy cache and IDE folders
+.firebase/
+.vs/
+firestore-debug.log

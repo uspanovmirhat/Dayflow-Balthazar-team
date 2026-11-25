@@ -6,14 +6,16 @@ import {
   getHabitAnalytics, getHabitLogs, getHabitStreak, getHabits, getTaskAnalytics,
   getTasks, getUserProfile, login, logout, register, removeHabitLog,
   requestPasswordReset, subscribeToAuthState, updateHabit, updateTask,
-  updateUserProfileFields, randomHabitColor,
+  updateUserProfileFields, randomHabitColor, checkPassword, isLocalDate, nextScheduledDate,
+  PASSWORD_MAX_LENGTH, PASSWORD_REQUIREMENT_LABELS, reloadEmailVerificationStatus, resendEmailVerification,
 } from './backend'
-import type { CalendarDay, Habit, HabitAnalytics, HabitInput, HabitLog, HabitSchedule, LocalDate, StreakSummary, Task, TaskAnalytics, UserProfile } from './backend'
+import type { CalendarDay, CalendarEvent, CalendarHabitStatus, Habit, HabitAnalytics, HabitInput, HabitLog, HabitSchedule, LocalDate, PasswordCheck, PasswordRequirement, StreakSummary, Task, TaskAnalytics, UserProfile } from './backend'
 import './App.css'
 
 type Page = 'dashboard' | 'habits' | 'tasks' | 'calendar' | 'analytics' | 'profile'
 type Notice = { kind: 'success' | 'error'; text: string } | null
-type DailyHabitProgress = { value: number; target: number; completed: boolean }
+type DailyHabitProgress = { value: number; target: number; completed: boolean; scheduled?: boolean }
+type CalendarHabitEvent = Extract<CalendarEvent, { kind: 'habit' }>
 
 const navItems: { id: Page; label: string; icon: string }[] = [
   { id: 'dashboard', label: 'Обзор', icon: '◫' }, { id: 'habits', label: 'Привычки', icon: '◉' },
@@ -34,6 +36,28 @@ const errorText = (error: unknown) => {
   }
   return error.message
 }
+const weekdayShort = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+const dayWord = (n: number) => n % 10 === 1 && n % 100 !== 11 ? 'день' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'дня' : 'дней'
+const intervalText = (n: number) => n === 1 ? 'ежедневно' : n === 2 ? 'через день' : n === 7 ? 'раз в неделю' : n === 14 ? 'раз в две недели' : `каждые ${n} ${dayWord(n)}`
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
+const shortDate = (date: LocalDate) => dateLabel(date, { day: 'numeric', month: 'long' })
+function scheduleLabel(schedule: HabitSchedule): string {
+  if (schedule.type === 'daily') return 'Ежедневно'
+  if (schedule.type === 'weekdays') return [...schedule.days].sort((a, b) => a - b).map((day) => weekdayShort[day - 1]).join(', ')
+  return capitalize(intervalText(schedule.everyNDays))
+}
+function upcomingDates(schedule: HabitSchedule, from: LocalDate, count: number): LocalDate[] {
+  const result: LocalDate[] = []
+  let cursor = from
+  for (let index = 0; index < count; index += 1) {
+    const next = nextScheduledDate(schedule, cursor)
+    result.push(next)
+    cursor = addDays(next, 1)
+  }
+  return result
+}
+const relativeDay = (date: LocalDate, today: LocalDate) => date === today ? 'сегодня' : date === addDays(today, 1) ? 'завтра' : shortDate(date)
+
 const quotes = [
   { text: '«Успех — это сумма небольших усилий, повторяемых изо дня в день».', author: 'Роберт Кольер' },
   { text: '«Путь в тысячу миль начинается с первого шага».', author: 'Лао-цзы' },
@@ -68,6 +92,11 @@ function App() {
   const refreshVersion = useRef(0)
   const pendingHabitToggles = useRef(new Set<string>())
   const pendingTaskToggles = useRef(new Set<string>())
+  const [emailVerified, setEmailVerified] = useState(false)
+  const [calendarLoading, setCalendarLoading] = useState(false)
+  const [calendarPending, setCalendarPending] = useState<Record<string, boolean>>({})
+  const calendarLoadVersion = useRef(0)
+  const pendingCalendarActions = useRef(new Set<string>())
 
   const refresh = useCallback(async (activeUser: User, showSpinner = true, savedMessage?: string) => {
     const version = ++refreshVersion.current
@@ -80,11 +109,12 @@ function App() {
       if (currentUid.current !== activeUser.uid || refreshVersion.current !== version) return
       setProfile(nextProfile); setHabits(nextHabits); setTasks(nextTasks)
 
+      const calendarMonth = calendarDateRef.current
       const results = await Promise.allSettled([
         getDashboardSummary(today),
         getHabitAnalytics(start, today),
         getTaskAnalytics(start, today, today),
-        getCalendarEventsForMonth(calendarDateRef.current),
+        getCalendarEventsForMonth(calendarMonth),
         Promise.all(nextHabits.map(async (habit) => [habit.id, await getHabitStreak(habit.id, today)] as const)),
         Promise.allSettled(nextHabits.map(async (habit) => [habit.id, await getDailyProgress(habit.id, today)] as const)),
       ] as const)
@@ -97,7 +127,7 @@ function App() {
       else failedSections.push(`аналитика привычек: ${errorText(results[1].reason)}`)
       if (results[2].status === 'fulfilled') setTaskAnalytics(results[2].value)
       else failedSections.push(`аналитика задач: ${errorText(results[2].reason)}`)
-      if (results[3].status === 'fulfilled') setCalendar(results[3].value)
+      if (results[3].status === 'fulfilled') { if (calendarDateRef.current === calendarMonth) setCalendar(results[3].value) }
       else failedSections.push(`календарь: ${errorText(results[3].reason)}`)
       const streakResult = results[4]
       if (streakResult.status === 'fulfilled') setStreaks(Object.fromEntries(streakResult.value))
@@ -121,7 +151,7 @@ function App() {
         setNotice(savedMessage
           ? { kind: 'success', text: `${savedMessage}. ${message} Сохранённые изменения уже отображены.` }
           : { kind: 'error', text: message })
-      } else if (!savedMessage) setNotice(null)
+      } else if (!savedMessage) setNotice((current) => current?.kind === 'error' ? null : current)
     } catch (error) {
       if (currentUid.current === activeUser.uid && refreshVersion.current === version) {
         setNotice(savedMessage
@@ -141,6 +171,7 @@ function App() {
         const previousUid = currentUid.current
         currentUid.current = nextUser?.uid ?? null
         setUser(nextUser)
+        setEmailVerified(nextUser?.emailVerified ?? false)
         if (nextUser) {
           if (previousUid !== nextUser.uid) { setProfile(null); setHabits([]); setHabitCompletionOverrides({}); setTasks([]); setSummary(null); setHabitAnalytics([]); setTaskAnalytics(null); setCalendar([]); setStreaks({}) }
           setLoading(true); await refresh(nextUser, false)
@@ -173,6 +204,10 @@ function App() {
       setNotice({ kind: 'error', text: 'Сначала дождитесь загрузки прогресса привычки.' })
       return
     }
+    if (previous.scheduled === false) {
+      setNotice({ kind: 'error', text: `Сегодня по расписанию отдых. Следующий раз — ${relativeDay(nextScheduledDate(habit.schedule, addDays(today, 1)), today)}.` })
+      return
+    }
     const operation = habit.type === 'count'
       ? action === 'undo' || (action === 'toggle' && previous.completed) ? 'undo' : 'increment'
       : previous.completed ? 'undo' : 'increment'
@@ -181,7 +216,7 @@ function App() {
 
     const optimistic = habit.type === 'count'
       ? { ...previous, value: Math.max(0, Math.min(previous.target, previous.value + (operation === 'increment' ? 1 : -1))), completed: operation === 'increment' ? previous.value + 1 >= previous.target : previous.value - 1 >= previous.target }
-      : { value: operation === 'increment' ? 1 : 0, target: 1, completed: operation === 'increment' }
+      : { value: operation === 'increment' ? 1 : 0, target: 1, completed: operation === 'increment', scheduled: true }
     setHabitCompletionOverrides((current) => ({ ...current, [habit.id]: optimistic }))
     pendingHabitToggles.current.add(habit.id)
     setPendingHabitIds((current) => ({ ...current, [habit.id]: true }))
@@ -235,7 +270,51 @@ function App() {
     if (kind === 'habit') setEditingHabit(item as Habit | undefined ?? null)
     else setEditingTask(item as Task | undefined ?? null)
   }
-  const changeCalendarMonth = (date: LocalDate) => { calendarDateRef.current = date; setCalendarDate(date); if (user) void refresh(user, false) }
+  const loadCalendar = async (date: LocalDate) => {
+    const version = ++calendarLoadVersion.current
+    setCalendarLoading(true)
+    try {
+      const next = await getCalendarEventsForMonth(date)
+      if (calendarLoadVersion.current === version && calendarDateRef.current === date) setCalendar(next)
+    } catch (error) {
+      if (calendarLoadVersion.current === version) setNotice({ kind: 'error', text: `Календарь: ${errorText(error)}` })
+    } finally {
+      if (calendarLoadVersion.current === version) setCalendarLoading(false)
+    }
+  }
+  const changeCalendarMonth = (date: LocalDate) => { calendarDateRef.current = date; setCalendarDate(date); if (user) void loadCalendar(date) }
+  const changeHabitOnDate = async (event: CalendarHabitEvent, operation: 'increment' | 'undo') => {
+    if (pendingCalendarActions.current.has(event.id)) return
+    if (event.date > today) { setNotice({ kind: 'error', text: 'Будущие дни отметить нельзя.' }); return }
+    pendingCalendarActions.current.add(event.id)
+    setCalendarPending((current) => ({ ...current, [event.id]: true }))
+    try {
+      let value = event.value
+      if (operation === 'increment') {
+        const log = await addHabitLog(event.habitId, event.habitType === 'count' ? { date: event.date, value: 1 } : { date: event.date })
+        value += log.value
+      } else {
+        const logs = await getHabitLogs(event.date, event.date, event.habitId)
+        if (!logs.length) throw new Error('Отметка не найдена. Обновите календарь и попробуйте снова.')
+        const toRemove = event.habitType === 'boolean' ? logs : [[...logs].sort((left, right) => right.completedAt.toMillis() - left.completedAt.toMillis())[0]]
+        await Promise.all(toRemove.map((log) => removeHabitLog(event.habitId, log.id)))
+        value = Math.max(0, value - toRemove.reduce((sum, log) => sum + log.value, 0))
+      }
+      const completed = event.habitType === 'boolean' ? operation === 'increment' : value >= event.target
+      const status: CalendarHabitStatus = completed ? 'completed' : event.date === today ? 'pending' : 'missed'
+      setCalendar((current) => current.map((day) => day.date !== event.date ? day : {
+        ...day,
+        events: day.events.map((item) => item.kind === 'habit' && item.id === event.id ? { ...item, value, completed, status } : item),
+      }))
+      afterMutation(operation === 'undo'
+        ? 'Отметка отменена'
+        : completed ? `«${event.title}» — выполнено (${relativeDay(event.date, today)})` : `Прогресс: ${value} из ${event.target}`)
+    } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) }
+    finally {
+      pendingCalendarActions.current.delete(event.id)
+      setCalendarPending((current) => ({ ...current, [event.id]: false }))
+    }
+  }
 
   if (loading) return <div className="boot-screen"><span className="brand-mark">d</span><span className="loader" />Загружаем Dayflow</div>
   if (!user) return <AuthScreen notice={notice} onNotice={setNotice} />
@@ -255,13 +334,13 @@ function App() {
         {page === 'dashboard' && <Dashboard profile={profile} today={today} summary={summary} progress={progress} allPlanned={allPlanned} allDone={allDone} habits={todaysHabits} tasks={visibleTasks} streaks={streaks} analytics={habitAnalytics} completionOverrides={habitCompletionOverrides} pendingHabitIds={pendingHabitIds} onToggleHabit={toggleHabit} onToggleTask={toggleTask} onCreate={showForm} onNavigate={setPage} onEditHabit={(item) => showForm('habit', item)} onEditTask={(item) => showForm('task', item)} />}
         {page === 'habits' && <HabitsPage habits={visibleHabits} today={today} streaks={streaks} completionOverrides={habitCompletionOverrides} pendingHabitIds={pendingHabitIds} onAdd={() => showForm('habit')} onToggle={toggleHabit} onEdit={(item) => showForm('habit', item)} onArchive={async (item) => { if (!window.confirm(`Архивировать привычку «${item.name}»?`)) return; try { await archiveHabit(item.id); await afterMutation('Привычка архивирована') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onDelete={async (item) => { if (!window.confirm(`Удалить привычку «${item.name}» вместе с историей?`)) return; try { await deleteHabit(item.id); await afterMutation('Привычка удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
         {page === 'tasks' && <TasksPage tasks={visibleTasks} onAdd={() => showForm('task')} onToggle={toggleTask} onEdit={(item) => showForm('task', item)} onDelete={async (item) => { if (!window.confirm(`Удалить задачу «${item.title}»?`)) return; try { await deleteTask(item.id); await afterMutation('Задача удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
-        {page === 'calendar' && <CalendarPage date={calendarDate} days={calendar} onChange={changeCalendarMonth} />}
+        {page === 'calendar' && <CalendarPage date={calendarDate} today={today} days={calendar} habits={habits} tasks={tasks} loading={calendarLoading} pending={calendarPending} onChange={changeCalendarMonth} onHabitAction={(event, operation) => void changeHabitOnDate(event, operation)} onToggleTask={(task) => void toggleTask(task)} />}
         {page === 'analytics' && <AnalyticsPage habits={habitAnalytics} tasks={taskAnalytics} completedTasks={completedTasks} />}
-        {page === 'profile' && profile && <ProfilePage profile={profile} onSave={async (fields) => { try { const next = await updateUserProfileFields(fields); setProfile(next); await afterMutation('Профиль обновлён') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onLogout={() => void logout()} />}
+        {page === 'profile' && profile && <ProfilePage profile={profile} emailVerified={emailVerified} onResendVerification={async () => { try { await resendEmailVerification(); setNotice({ kind: 'success', text: `Письмо для подтверждения отправлено на ${profile.email}.` }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onCheckVerification={async () => { try { const verified = await reloadEmailVerificationStatus(); setEmailVerified(verified); setNotice(verified ? { kind: 'success', text: 'Email подтверждён. Спасибо!' } : { kind: 'error', text: 'Подтверждение пока не получено. Проверьте почту и папку «Спам».' }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onSave={async (fields) => { try { const next = await updateUserProfileFields(fields); setProfile(next); await afterMutation('Профиль обновлён') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onLogout={() => void logout()} />}
       </div>
       <nav className="mobile-nav" aria-label="Основная навигация">{navItems.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><Icon>{item.icon}</Icon><span>{item.id === 'profile' ? 'Профиль' : item.label}</span></button>)}</nav>
     </main>
-    {modal && <ItemModal kind={modal} habit={editingHabit} task={editingTask} onClose={() => setModal(null)} onSave={async (data) => {
+    {modal && <ItemModal kind={modal} habit={editingHabit} task={editingTask} today={today} onClose={() => setModal(null)} onSave={async (data) => {
       try {
         if (modal === 'habit') {
           const input = data as HabitInput
@@ -286,20 +365,70 @@ function App() {
   </div>
 }
 
+const strengthLabels = ['', 'слабый', 'нормальный', 'хороший', 'надёжный']
+function PasswordField({ label, value, onChange, autoComplete, placeholder, visible, onToggleVisible, invalid }: { label: string; value: string; onChange: (value: string) => void; autoComplete: string; placeholder?: string; visible: boolean; onToggleVisible: () => void; invalid?: boolean }) {
+  return <label>{label}<span className="password-field"><input required type={visible ? 'text' : 'password'} autoComplete={autoComplete} maxLength={PASSWORD_MAX_LENGTH} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} aria-invalid={invalid || undefined} /><button type="button" className="password-toggle" onClick={onToggleVisible} aria-label={visible ? 'Скрыть пароль' : 'Показать пароль'} aria-pressed={visible}>{visible ? 'Скрыть' : 'Показать'}</button></span></label>
+}
+function PasswordStrength({ check, hasValue }: { check: PasswordCheck; hasValue: boolean }) {
+  const requirements: PasswordRequirement[] = ['length', 'letter', 'digit', ...(check.missing.includes('noEdgeSpaces') ? ['noEdgeSpaces' as const] : [])]
+  const level = hasValue ? Math.max(1, check.score) : 0
+  return <div className="password-strength" aria-live="polite">
+    <div className={`strength-bar level-${check.valid ? level : hasValue ? 1 : 0}`}>{[1, 2, 3, 4].map((segment) => <i key={segment} className={segment <= level ? 'on' : ''} />)}</div>
+    <small>{!hasValue ? 'Придумайте пароль' : check.valid ? `Надёжность: ${strengthLabels[level]}` : 'Пароль пока не подходит'}</small>
+    <ul>{requirements.map((requirement) => { const met = hasValue && !check.missing.includes(requirement); return <li key={requirement} className={met ? 'met' : ''}>{met ? '✓' : '○'} {PASSWORD_REQUIREMENT_LABELS[requirement]}</li> })}</ul>
+  </div>
+}
+
 function AuthScreen({ notice, onNotice }: { notice: Notice; onNotice: (notice: Notice) => void }) {
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login')
   const [busy, setBusy] = useState(false)
-  const [values, setValues] = useState({ name: '', email: '', password: '' })
+  const [values, setValues] = useState({ name: '', email: '', password: '', confirmPassword: '' })
+  const [showPassword, setShowPassword] = useState(false)
+  const [attempted, setAttempted] = useState(false)
+  const isRegister = mode === 'register'
+  const passwordCheck = checkPassword(values.password)
+  const trimmedName = values.name.trim()
+  const nameError = isRegister && (attempted || trimmedName.length > 0) && trimmedName.length < 2 ? 'Имя должно содержать минимум 2 символа.' : null
+  const confirmError = !isRegister ? null
+    : values.confirmPassword.length > 0 && values.confirmPassword !== values.password ? 'Пароли не совпадают.'
+      : attempted && values.confirmPassword.length === 0 ? 'Повторите пароль.' : null
+  const setField = (field: keyof typeof values) => (value: string) => setValues((current) => ({ ...current, [field]: value }))
+  const switchMode = (next: typeof mode) => {
+    setMode(next); setAttempted(false); setShowPassword(false); onNotice(null)
+    setValues((current) => ({ ...current, password: '', confirmPassword: '' }))
+  }
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); setBusy(true); onNotice(null)
+    event.preventDefault(); onNotice(null)
+    if (isRegister) {
+      setAttempted(true)
+      if (trimmedName.length < 2) return onNotice({ kind: 'error', text: 'Имя должно содержать минимум 2 символа.' })
+      if (!passwordCheck.valid) return onNotice({ kind: 'error', text: 'Пароль не соответствует требованиям ниже.' })
+      if (values.confirmPassword !== values.password) return onNotice({ kind: 'error', text: 'Пароли не совпадают.' })
+    }
+    setBusy(true)
     try {
-      if (mode === 'register') await register({ displayName: values.name, email: values.email, password: values.password })
-      else if (mode === 'reset') { await requestPasswordReset(values.email); onNotice({ kind: 'success', text: 'Письмо для сброса пароля отправлено на вашу почту.' }) }
+      if (isRegister) {
+        const email = values.email.trim().toLowerCase()
+        const result = await register({ displayName: values.name, email, password: values.password, confirmPassword: values.confirmPassword })
+        onNotice({ kind: 'success', text: result.verificationEmailSent
+          ? `Аккаунт создан! Мы отправили письмо для подтверждения на ${email}.`
+          : 'Аккаунт создан. Письмо для подтверждения email отправить не удалось — повторите из профиля.' })
+      } else if (mode === 'reset') { await requestPasswordReset(values.email); onNotice({ kind: 'success', text: 'Письмо для сброса пароля отправлено на вашу почту.' }) }
       else await login(values.email, values.password)
     } catch (error) { onNotice({ kind: 'error', text: errorText(error) }) }
     finally { setBusy(false) }
   }
-  return <main className="auth-page"><div className="auth-decoration"><span className="orb orb-one" /><span className="orb orb-two" /><div className="auth-quote"><span>✦ МЫСЛЬ ДНЯ</span><p>«Успех — это сумма небольших усилий, повторяемых изо дня в день».</p><small>Роберт Кольер</small></div></div><section className="auth-panel"><div className="brand auth-brand"><span className="brand-mark">d</span><span>dayflow</span></div><div className="auth-form-wrap"><span className="eyebrow">ВАШЕ ПРОСТРАНСТВО ДЛЯ РОСТА</span><h1>{mode === 'register' ? 'Создайте аккаунт' : mode === 'reset' ? 'Восстановление пароля' : 'С возвращением!'}</h1><p className="muted">{mode === 'register' ? 'Начните путь к своим целям уже сегодня.' : mode === 'reset' ? 'Укажите email, и мы отправим ссылку для сброса.' : 'Войдите, чтобы продолжить свой путь.'}</p>{notice && <div className={`auth-alert ${notice.kind}`}>{notice.text}</div>}<form onSubmit={(event) => void submit(event)}>{mode === 'register' && <label>Ваше имя<input required maxLength={120} autoComplete="name" value={values.name} onChange={(e) => setValues({ ...values, name: e.target.value })} placeholder="Анна" /></label>}<label>Email<input required type="email" autoComplete="email" value={values.email} onChange={(e) => setValues({ ...values, email: e.target.value })} placeholder="you@example.com" /></label>{mode !== 'reset' && <label>Пароль<input required minLength={8} type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={values.password} onChange={(e) => setValues({ ...values, password: e.target.value })} placeholder="Не менее 8 символов" /></label>}{mode === 'login' && <button className="text-action forgot" type="button" onClick={() => setMode('reset')}>Забыли пароль?</button>}<button className="button primary full" disabled={busy}>{busy ? 'Подождите…' : mode === 'register' ? 'Создать аккаунт' : mode === 'reset' ? 'Отправить ссылку' : 'Войти'}<span>→</span></button></form><p className="auth-switch">{mode === 'reset' ? <button className="text-action" onClick={() => setMode('login')}>← Вернуться ко входу</button> : <>{mode === 'register' ? 'Уже есть аккаунт?' : 'Впервые в Dayflow?'} <button className="text-action" onClick={() => setMode(mode === 'register' ? 'login' : 'register')}>{mode === 'register' ? 'Войти' : 'Создать аккаунт'}</button></>}</p></div><small className="auth-footer">Ваши цели. Ваш темп. Ваш Dayflow.</small></section></main>
+  return <main className="auth-page"><div className="auth-decoration"><span className="orb orb-one" /><span className="orb orb-two" /><div className="auth-quote"><span>✦ МЫСЛЬ ДНЯ</span><p>«Успех — это сумма небольших усилий, повторяемых изо дня в день».</p><small>Роберт Кольер</small></div></div><section className="auth-panel"><div className="brand auth-brand"><span className="brand-mark">d</span><span>dayflow</span></div><div className="auth-form-wrap"><span className="eyebrow">ВАШЕ ПРОСТРАНСТВО ДЛЯ РОСТА</span><h1>{isRegister ? 'Создайте аккаунт' : mode === 'reset' ? 'Восстановление пароля' : 'С возвращением!'}</h1><p className="muted">{isRegister ? 'Начните путь к своим целям уже сегодня.' : mode === 'reset' ? 'Укажите email, и мы отправим ссылку для сброса.' : 'Войдите, чтобы продолжить свой путь.'}</p>{notice && <div className={`auth-alert ${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>{notice.text}</div>}
+    <form onSubmit={(event) => void submit(event)}>
+      {isRegister && <label>Ваше имя<input required minLength={2} maxLength={120} autoComplete="name" value={values.name} onChange={(event) => setField('name')(event.target.value)} placeholder="Анна" aria-invalid={Boolean(nameError) || undefined} />{nameError && <small className="field-error">{nameError}</small>}</label>}
+      <label>Email<input required type="email" maxLength={320} autoComplete="email" value={values.email} onChange={(event) => setField('email')(event.target.value)} placeholder="you@example.com" /></label>
+      {mode !== 'reset' && <PasswordField label="Пароль" value={values.password} onChange={setField('password')} autoComplete={isRegister ? 'new-password' : 'current-password'} placeholder={isRegister ? 'Не менее 8 символов, буквы и цифры' : 'Ваш пароль'} visible={showPassword} onToggleVisible={() => setShowPassword((current) => !current)} invalid={isRegister && attempted && !passwordCheck.valid} />}
+      {isRegister && <PasswordStrength check={passwordCheck} hasValue={values.password.length > 0} />}
+      {isRegister && <div className="confirm-field"><PasswordField label="Повторите пароль" value={values.confirmPassword} onChange={setField('confirmPassword')} autoComplete="new-password" placeholder="Введите пароль ещё раз" visible={showPassword} onToggleVisible={() => setShowPassword((current) => !current)} invalid={Boolean(confirmError)} />{confirmError ? <small className="field-error" role="alert">{confirmError}</small> : values.confirmPassword.length > 0 && <small className="field-ok">✓ Пароли совпадают</small>}</div>}
+      {mode === 'login' && <button className="text-action forgot" type="button" onClick={() => switchMode('reset')}>Забыли пароль?</button>}
+      <button className="button primary full" disabled={busy}>{busy ? 'Подождите…' : isRegister ? 'Создать аккаунт' : mode === 'reset' ? 'Отправить ссылку' : 'Войти'}<span>→</span></button>
+    </form>
+    <p className="auth-switch">{mode === 'reset' ? <button className="text-action" onClick={() => switchMode('login')}>← Вернуться ко входу</button> : <>{isRegister ? 'Уже есть аккаунт?' : 'Впервые в Dayflow?'} <button className="text-action" onClick={() => switchMode(isRegister ? 'login' : 'register')}>{isRegister ? 'Войти' : 'Создать аккаунт'}</button></>}</p></div><small className="auth-footer">Ваши цели. Ваш темп. Ваш Dayflow.</small></section></main>
 }
 
 function PageHeading({ eyebrow, title, subtitle, action }: { eyebrow?: string; title: string; subtitle?: string; action?: ReactNode }) { return <div className="page-heading"><div>{eyebrow && <span className="eyebrow">{eyebrow}</span>}<h1>{title}</h1>{subtitle && <p className="muted">{subtitle}</p>}</div>{action}</div> }
@@ -325,7 +454,7 @@ function StatCard({ icon, label, value, sub, onClick }: { icon: string; label: s
 
 const habitIcons = ['☼', '▤', '♧', '⌁', '◉', '✦']
 function CountProgressControls({ progress, ready, pending, onIncrement, onUndo }: { progress: DailyHabitProgress; ready: boolean; pending: boolean; onIncrement: () => void; onUndo: () => void }) { return <div className="count-progress" aria-label={`Прогресс ${progress.value} из ${progress.target}`} aria-busy={pending}><strong>{pending ? 'Сохранение…' : `${progress.value}/${progress.target}`}</strong><button type="button" aria-label="Добавить выполнение" disabled={!ready || pending || progress.value >= progress.target} onClick={onIncrement}>＋</button><button type="button" aria-label="Отменить последнее выполнение" disabled={!ready || pending || progress.value <= 0} onClick={onUndo}>−</button></div> }
-function HabitRow({ habit, progress, ready, pending, streak, index, onAction, onEdit }: { habit: Habit; progress: DailyHabitProgress; ready: boolean; pending: boolean; streak: number; index: number; onAction: (action: 'toggle' | 'increment' | 'undo') => void; onEdit: () => void }) { return <div className={`habit-row ${progress.completed ? 'is-done' : ''}`}><span className={`habit-icon icon-tone-${index % 4}`} style={{ color: habit.color, backgroundColor: `${habit.color}22` }}>{habitIcons[index % habitIcons.length]}</span><button className="row-main" onClick={onEdit}><strong>{habit.name}</strong><small>{habit.type === 'count' ? `Цель: ${progress.target} в день` : habit.description || 'Ежедневная привычка'}</small></button><span className="streak-label">🔥 {streak} дн.</span>{habit.type === 'count' ? <CountProgressControls progress={progress} ready={ready} pending={pending} onIncrement={() => onAction('increment')} onUndo={() => onAction('undo')} /> : <button className={`check-button ${progress.completed ? 'checked' : ''}`} style={progress.completed ? { borderColor: habit.color, backgroundColor: habit.color } : {}} disabled={!ready || pending} aria-busy={pending} onClick={() => onAction('toggle')} aria-label={pending ? 'Сохранение отметки' : progress.completed ? 'Отменить выполнение' : 'Отметить выполнение'}>{pending ? '…' : progress.completed ? '✓' : ''}</button>}</div> }
+function HabitRow({ habit, progress, ready, pending, streak, index, onAction, onEdit }: { habit: Habit; progress: DailyHabitProgress; ready: boolean; pending: boolean; streak: number; index: number; onAction: (action: 'toggle' | 'increment' | 'undo') => void; onEdit: () => void }) { return <div className={`habit-row ${progress.completed ? 'is-done' : ''}`}><span className={`habit-icon icon-tone-${index % 4}`} style={{ color: habit.color, backgroundColor: `${habit.color}22` }}>{habitIcons[index % habitIcons.length]}</span><button className="row-main" onClick={onEdit}><strong>{habit.name}</strong><small>{habit.type === 'count' ? `Цель: ${progress.target} в день` : habit.description || scheduleLabel(habit.schedule)}</small></button><span className="streak-label">🔥 {streak} дн.</span>{habit.type === 'count' ? <CountProgressControls progress={progress} ready={ready} pending={pending} onIncrement={() => onAction('increment')} onUndo={() => onAction('undo')} /> : <button className={`check-button ${progress.completed ? 'checked' : ''}`} style={progress.completed ? { borderColor: habit.color, backgroundColor: habit.color } : {}} disabled={!ready || pending} aria-busy={pending} onClick={() => onAction('toggle')} aria-label={pending ? 'Сохранение отметки' : progress.completed ? 'Отменить выполнение' : 'Отметить выполнение'}>{pending ? '…' : progress.completed ? '✓' : ''}</button>}</div> }
 const priorities: Record<Task['priority'], string> = { high: 'Высокий', medium: 'Средний', low: 'Низкий' }
 function TaskRow({ task, onToggle, onEdit }: { task: Task; onToggle: () => void; onEdit: () => void }) { return <div className={`task-row ${task.status === 'completed' ? 'is-done' : ''}`}><button className={`check-button task-check ${task.status === 'completed' ? 'checked' : ''}`} onClick={onToggle} aria-label="Изменить статус задачи">{task.status === 'completed' ? '✓' : ''}</button><button className="row-main" onClick={onEdit}><strong>{task.title}</strong><small><span>▢</span> {task.dueDate ? dateLabel(task.dueDate, { day: 'numeric', month: 'long' }) : 'Без срока'}{task.description && ` · ${task.description}`}</small></button><span className={`priority priority-${task.priority}`}>{priorities[task.priority]}</span></div> }
 function EmptyState({ title, text, action, onClick }: { title: string; text: string; action?: string; onClick?: () => void }) { return <div className="empty-state"><span className="empty-icon">✦</span><strong>{title}</strong><p>{text}</p>{action && <button className="button secondary" onClick={onClick}>{action}</button>}</div> }
@@ -357,30 +486,109 @@ function HabitsPage({ habits, today, streaks, completionOverrides, pendingHabitI
     <PageHeading eyebrow="ВАШИ РИТУАЛЫ" title="Привычки" subtitle="Небольшие действия, которые меняют каждый день." action={<button className="button primary" onClick={onAdd}>＋ Новая привычка</button>} />
     {progressError && <div className="inline-error" role="alert">Не удалось загрузить текущий прогресс: {progressError}</div>}
     {historyError && <div className="inline-error" role="alert">Не удалось загрузить историю привычек: {historyError}</div>}
-    {habits.length ? <section className="card list-card"><div className="section-head"><div><h2>Активные привычки</h2><p>{habits.length} в вашем расписании</p></div></div><div className="rows">{habits.map((habit, index) => { const progress = completionOverrides[habit.id] ?? dailyProgress[habit.id] ?? { value: 0, target: habit.targetPerDay, completed: false }; const ready = Boolean(completionOverrides[habit.id] ?? dailyProgress[habit.id]); const pending = Boolean(pendingHabitIds[habit.id]); return <div className="habit-row expanded" key={habit.id}><span className={`habit-icon icon-tone-${index % 4}`} style={{ color: habit.color, backgroundColor: `${habit.color}22` }}>{habitIcons[index % habitIcons.length]}</span><button className="row-main" onClick={() => onEdit(habit)}><strong>{habit.name}</strong><small>{habit.description || (habit.type === 'count' ? `Цель: ${progress.target} в день` : 'Ежедневно')}</small></button><span className="streak-label">🔥 {streaks[habit.id]?.currentStreak ?? 0} дн.</span>{habit.type === 'count' ? <CountProgressControls progress={progress} ready={ready} pending={pending} onIncrement={() => onToggle(habit, 'increment')} onUndo={() => onToggle(habit, 'undo')} /> : <button className={`check-button ${progress.completed ? 'checked' : ''}`} style={progress.completed ? { borderColor: habit.color, backgroundColor: habit.color } : {}} disabled={!ready || pending} aria-busy={pending} onClick={() => onToggle(habit, 'toggle')} aria-label={pending ? 'Сохранение отметки' : 'Отметить привычку'}>{pending ? '…' : progress.completed ? '✓' : ''}</button>}<div className="row-actions"><button onClick={() => onEdit(habit)}>Изменить</button><button onClick={() => onArchive(habit)}>В архив</button><button className="danger-text" onClick={() => onDelete(habit)}>Удалить</button></div></div> })}</div></section> : <section className="card"><EmptyState title="Создайте свою первую привычку" text="Выберите действие, которое хотите регулярно повторять." action="Добавить привычку" onClick={onAdd} /></section>}
+    {habits.length ? <section className="card list-card"><div className="section-head"><div><h2>Активные привычки</h2><p>{habits.length} в вашем расписании</p></div></div><div className="rows">{habits.map((habit, index) => {
+      const progress = completionOverrides[habit.id] ?? dailyProgress[habit.id] ?? { value: 0, target: habit.targetPerDay, completed: false }
+      const ready = Boolean(completionOverrides[habit.id] ?? dailyProgress[habit.id])
+      const pending = Boolean(pendingHabitIds[habit.id])
+      const restDay = ready && progress.scheduled === false
+      const details = [
+        scheduleLabel(habit.schedule),
+        habit.type === 'count' ? `цель ${progress.target} в день` : '',
+        restDay ? `следующий раз ${relativeDay(nextScheduledDate(habit.schedule, addDays(today, 1)), today)}` : '',
+        habit.description,
+      ].filter(Boolean).join(' · ')
+      return <div className={`habit-row expanded ${restDay ? 'is-rest' : ''}`} key={habit.id}><span className={`habit-icon icon-tone-${index % 4}`} style={{ color: habit.color, backgroundColor: `${habit.color}22` }}>{habitIcons[index % habitIcons.length]}</span><button className="row-main" onClick={() => onEdit(habit)}><strong>{habit.name}</strong><small>{details}</small></button><span className="streak-label">🔥 {streaks[habit.id]?.currentStreak ?? 0} дн.</span>{restDay ? <span className="rest-badge" title="По расписанию сегодня день отдыха">Отдых</span> : habit.type === 'count' ? <CountProgressControls progress={progress} ready={ready} pending={pending} onIncrement={() => onToggle(habit, 'increment')} onUndo={() => onToggle(habit, 'undo')} /> : <button className={`check-button ${progress.completed ? 'checked' : ''}`} style={progress.completed ? { borderColor: habit.color, backgroundColor: habit.color } : {}} disabled={!ready || pending} aria-busy={pending} onClick={() => onToggle(habit, 'toggle')} aria-label={pending ? 'Сохранение отметки' : 'Отметить привычку'}>{pending ? '…' : progress.completed ? '✓' : ''}</button>}<div className="row-actions"><button onClick={() => onEdit(habit)}>Изменить</button><button onClick={() => onArchive(habit)}>В архив</button><button className="danger-text" onClick={() => onDelete(habit)}>Удалить</button></div></div>
+    })}</div></section> : <section className="card"><EmptyState title="Создайте свою первую привычку" text="Выберите действие, которое хотите регулярно повторять." action="Добавить привычку" onClick={onAdd} /></section>}
     {!!habits.length && <section className="card list-card"><div className="section-head"><div><h2>Серии привычек</h2><p>Текущая и лучшая серия по каждому ритуалу</p></div></div><div className="rows">{habits.map((habit) => <div className="streak-row" key={habit.id}><span>🔥</span><strong>{habit.name}</strong><span>Сейчас <b>{streaks[habit.id]?.currentStreak ?? 0} дн.</b></span><span>Рекорд <b>{streaks[habit.id]?.longestStreak ?? 0} дн.</b></span></div>)}</div></section>}
     <section className="card list-card"><div className="section-head"><div><h2>История выполнения</h2><p>Последние 30 дней</p></div></div>{history.length ? <div className="rows">{history.slice(0, 24).map((log) => <div className="history-row" key={`${log.habitId}-${log.id}`}><span className="history-check">✓</span><strong>{habits.find((habit) => habit.id === log.habitId)?.name ?? 'Привычка'}</strong><small>{dateLabel(log.date, { day: 'numeric', month: 'long' })}</small><b>{log.value > 1 ? `+${log.value}` : 'Выполнено'}</b></div>)}</div> : <EmptyState title="Записей пока нет" text="Отмеченные привычки появятся здесь." />}</section>
   </>
 }
 function TasksPage({ tasks, onAdd, onToggle, onEdit, onDelete }: { tasks: Task[]; onAdd: () => void; onToggle: (task: Task) => void; onEdit: (task: Task) => void; onDelete: (task: Task) => void }) { const [filter, setFilter] = useState('all'); const sorted = [...tasks].filter((task) => filter === 'all' || (filter === 'active' ? task.status !== 'completed' : task.status === 'completed')).sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999')); return <><PageHeading eyebrow="ПЛАНЫ И ЦЕЛИ" title="Задачи" subtitle="Сосредоточьтесь на том, что важно сегодня." action={<button className="button primary" onClick={onAdd}>＋ Новая задача</button>} /><div className="filter-tabs">{[['all', 'Все задачи'], ['active', 'В работе'], ['done', 'Выполненные']].map(([id, label]) => <button className={filter === id ? 'selected' : ''} key={id} onClick={() => setFilter(id)}>{label}</button>)}</div><section className="card list-card">{sorted.length ? <div className="rows">{sorted.map((task) => <div className="task-row expanded" key={task.id}><button className={`check-button task-check ${task.status === 'completed' ? 'checked' : ''}`} onClick={() => onToggle(task)}>{task.status === 'completed' ? '✓' : ''}</button><button className="row-main" onClick={() => onEdit(task)}><strong>{task.title}</strong><small>{task.dueDate ? `▢ ${dateLabel(task.dueDate, { day: 'numeric', month: 'long', year: 'numeric' })}` : 'Без срока'}{task.description && ` · ${task.description}`}</small></button><span className={`priority priority-${task.priority}`}>{priorities[task.priority]}</span><div className="row-actions"><button onClick={() => onEdit(task)}>Изменить</button><button className="danger-text" onClick={() => onDelete(task)}>Удалить</button></div></div>)}</div> : <EmptyState title="Здесь пока пусто" text="Добавьте задачу или измените фильтр." action="Добавить задачу" onClick={onAdd} />}</section></> }
 
-function CalendarPage({ date, days, onChange }: { date: LocalDate; days: CalendarDay[]; onChange: (date: LocalDate) => void }) {
-  const [selected, setSelected] = useState<LocalDate>(date)
+const habitStatusText: Record<CalendarHabitStatus, string> = { completed: 'Выполнено', missed: 'Пропущено', pending: 'Нужно сделать сегодня', upcoming: 'Запланировано' }
+const taskStatusText: Record<Task['status'], string> = { todo: 'к выполнению', in_progress: 'в работе', completed: 'выполнена' }
+function eventDotState(event: CalendarEvent, today: LocalDate): CalendarHabitStatus {
+  if (event.kind === 'habit') return event.status
+  if (event.kind === 'task' && event.status === 'completed') return 'completed'
+  return event.date < today ? 'missed' : event.date === today ? 'pending' : 'upcoming'
+}
+const eventColor = (event: CalendarEvent) => event.kind === 'habit' ? event.color : event.kind === 'task' ? '#91AFC9' : '#C9A891'
+
+function CalendarPage({ date, today, days, habits, tasks, loading, pending, onChange, onHabitAction, onToggleTask }: { date: LocalDate; today: LocalDate; days: CalendarDay[]; habits: Habit[]; tasks: Task[]; loading: boolean; pending: Record<string, boolean>; onChange: (date: LocalDate) => void; onHabitAction: (event: CalendarHabitEvent, operation: 'increment' | 'undo') => void; onToggleTask: (task: Task) => void }) {
+  const monthKey = date.slice(0, 7)
+  const todayMonth = today.slice(0, 7)
+  const [selected, setSelected] = useState<LocalDate>(() => monthKey === todayMonth ? today : `${monthKey}-01` as LocalDate)
   const [year, month] = date.split('-').map(Number)
-  const first = new Date(year, month - 1, 1)
-  const offset = (first.getDay() + 6) % 7
+  const offset = (new Date(year, month - 1, 1).getDay() + 6) % 7
   const count = new Date(year, month, 0).getDate()
-  const cells = [...Array(offset).fill(null), ...Array.from({ length: count }, (_, i) => `${year}-${String(month).padStart(2, '0')}-${String(i + 1).padStart(2, '0')}` as LocalDate)]
+  const cells: (LocalDate | null)[] = [...Array<null>(offset).fill(null), ...Array.from({ length: count }, (_, i) => `${monthKey}-${String(i + 1).padStart(2, '0')}` as LocalDate)]
   const eventMap = new Map(days.map((day) => [day.date, day.events]))
   const selectedEvents = eventMap.get(selected) ?? []
-  const stepMonth = (amount: number) => { const next = new Date(year, month - 1 + amount, 1); const local = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}-01` as LocalDate; onChange(local); setSelected(local) }
-  return <><PageHeading eyebrow="ВАШ РИТМ" title="Календарь" subtitle="Задачи и привычки в одном расписании." /><section className="card calendar-card"><div className="calendar-head"><button className="round-action" onClick={() => stepMonth(-1)}>‹</button><h2>{dateLabel(date, { month: 'long', year: 'numeric' })}</h2><button className="round-action" onClick={() => stepMonth(1)}>›</button></div><div className="calendar-grid weekday-grid">{['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((day) => <span key={day}>{day}</span>)}</div><div className="calendar-grid">{cells.map((day, i) => day ? <button key={day} className={`calendar-day ${day === selected ? 'selected' : ''} ${day === todayAt(Intl.DateTimeFormat().resolvedOptions().timeZone) ? 'today' : ''}`} onClick={() => setSelected(day)}><span>{Number(day.slice(-2))}</span>{eventMap.get(day)?.slice(0, 3).map((event, index) => <i key={`${event.kind}-${event.id}`} style={{ backgroundColor: event.kind === 'habit' ? event.color : '#91afc9', left: `calc(50% + ${(index - ((Math.min(eventMap.get(day)?.length ?? 0, 3) - 1) / 2)) * 6}px)` }} />)}</button> : <span key={`blank-${i}`} />)}</div><div className="calendar-legend"><span><i className="blue-dot" />События</span><span><i className="today-dot" />Сегодня</span></div></section><section className="card list-card"><div className="section-head"><div><h2>{dateLabel(selected)}</h2><p>{selectedEvents.length ? `${selectedEvents.length} события` : 'План на этот день'}</p></div></div>{selectedEvents.length ? <div className="rows">{selectedEvents.map((event) => <div className="calendar-event" key={`${event.kind}-${event.id}`}><span className="event-kind" style={event.kind === 'habit' ? { color: event.color, backgroundColor: `${event.color}22` } : {}}>{event.kind === 'habit' ? '◉' : '✓'}</span><span><strong>{event.title}</strong><small>{event.kind === 'habit' ? event.completed ? 'Выполнено' : 'Привычка' : priorities[event.priority]}</small></span>{event.kind === 'habit' && <span className={`check-button ${event.completed ? 'checked' : ''}`} style={event.completed ? { borderColor: event.color, backgroundColor: event.color } : {}}>{event.completed ? '✓' : ''}</span>}</div>)}</div> : <EmptyState title="На эту дату событий нет" text="Привычки и задачи появятся здесь." />}</section></>
+  const selectedHabits = selectedEvents.filter((event): event is CalendarHabitEvent => event.kind === 'habit')
+  const selectedTasks = selectedEvents.filter((event) => event.kind === 'task')
+  const selectedReminders = selectedEvents.filter((event) => event.kind === 'reminder')
+  const habitById = new Map(habits.map((habit) => [habit.id, habit]))
+  const taskById = new Map(tasks.map((task) => [task.id, task]))
+  const monthStart = (shift: number) => { const next = new Date(year, month - 1 + shift, 1); return `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}-01` as LocalDate }
+  const openMonth = (first: LocalDate) => { onChange(first); setSelected(first.slice(0, 7) === todayMonth ? today : first) }
+  const openDate = (target: LocalDate) => { if (target.slice(0, 7) !== monthKey) onChange(`${target.slice(0, 7)}-01` as LocalDate); setSelected(target) }
+  const dueSoFar = days.flatMap((day) => day.events).filter((event): event is CalendarHabitEvent => event.kind === 'habit' && event.date <= today)
+  const doneSoFar = dueSoFar.filter((event) => event.completed).length
+  const intervalHabits = habits.filter((habit) => habit.schedule.type === 'interval')
+  const nextFor = (habit: Habit) => {
+    const todayEvent = eventMap.get(today)?.find((event): event is CalendarHabitEvent => event.kind === 'habit' && event.habitId === habit.id)
+    return nextScheduledDate(habit.schedule, todayEvent?.completed ? addDays(today, 1) : today)
+  }
+  const summaryParts = [
+    selectedHabits.length ? `привычки ${selectedHabits.filter((event) => event.completed).length} из ${selectedHabits.length}` : '',
+    selectedTasks.length ? `задачи ${selectedTasks.filter((event) => event.kind === 'task' && event.status === 'completed').length} из ${selectedTasks.length}` : '',
+    selectedReminders.length ? `напоминаний: ${selectedReminders.length}` : '',
+  ].filter(Boolean)
+
+  return <><PageHeading eyebrow="ВАШ РИТМ" title="Календарь" subtitle="Задачи и привычки в одном расписании. Отмечайте выполнение за сегодня и прошедшие дни." />
+    <section className="card calendar-card">
+      <div className="calendar-head"><button className="round-action" aria-label="Предыдущий месяц" onClick={() => openMonth(monthStart(-1))}>‹</button><div className="calendar-title"><h2>{dateLabel(date, { month: 'long', year: 'numeric' })}</h2>{loading ? <span className="loader small" aria-label="Загрузка" /> : monthKey !== todayMonth && <button className="text-action" onClick={() => openMonth(`${todayMonth}-01` as LocalDate)}>К сегодня</button>}</div><button className="round-action" aria-label="Следующий месяц" onClick={() => openMonth(monthStart(1))}>›</button></div>
+      <div className="calendar-grid weekday-grid">{weekdayShort.map((day) => <span key={day}>{day}</span>)}</div>
+      <div className="calendar-grid">{cells.map((day, i) => {
+        if (!day) return <span key={`blank-${i}`} />
+        const events = eventMap.get(day) ?? []
+        return <button key={day} type="button" className={`calendar-day ${day === selected ? 'selected' : ''} ${day === today ? 'today' : ''} ${day < today ? 'past' : ''}`} aria-pressed={day === selected} aria-label={`${dateLabel(day)}${events.length ? `, событий: ${events.length}` : ''}`} onClick={() => setSelected(day)}>
+          <span>{Number(day.slice(-2))}</span>
+          {events.length > 0 && <span className="calendar-dots">{events.slice(0, 4).map((event) => <i key={`${event.kind}-${event.id}`} className={eventDotState(event, today)} style={{ '--dot-color': eventColor(event) } as CSSProperties} />)}{events.length > 4 && <b>+{events.length - 4}</b>}</span>}
+        </button>
+      })}</div>
+      <div className="calendar-legend"><span><i className="legend-dot completed" />Выполнено</span><span><i className="legend-dot upcoming" />Запланировано</span><span><i className="legend-dot missed" />Пропущено</span><span><i className="today-dot" />Сегодня</span></div>
+      {dueSoFar.length > 0 && <p className="calendar-summary">За месяц выполнено <strong>{doneSoFar} из {dueSoFar.length}</strong> запланированных отметок привычек</p>}
+    </section>
+    <section className="card list-card"><div className="section-head"><div><h2>{capitalize(dateLabel(selected))}</h2><p>{summaryParts.length ? capitalize(summaryParts.join(' · ')) : selected < today ? 'В этот день ничего не было запланировано' : 'Свободный день'}</p></div></div>
+      {selectedEvents.length ? <div className="rows">{selectedEvents.map((event) => {
+        if (event.kind === 'habit') {
+          const habit = habitById.get(event.habitId)
+          const busy = Boolean(pending[event.id])
+          const editable = event.date <= today && Boolean(habit)
+          return <div className={`calendar-event habit-${event.status}`} key={`habit-${event.id}`}>
+            <span className="event-kind" style={{ color: event.color, backgroundColor: `${event.color}22` }}>◉</span>
+            <span><strong>{event.title}</strong><small><span className={`status-pill ${event.status}`}>{habitStatusText[event.status]}</span>{habit ? ` · ${scheduleLabel(habit.schedule)}` : ''}{event.habitType === 'count' ? ` · ${event.value} из ${event.target}` : ''}</small></span>
+            {!editable ? null : event.habitType === 'count'
+              ? <CountProgressControls progress={{ value: event.value, target: event.target, completed: event.completed }} ready pending={busy} onIncrement={() => onHabitAction(event, 'increment')} onUndo={() => onHabitAction(event, 'undo')} />
+              : <button type="button" className={`check-button ${event.completed ? 'checked' : ''}`} style={event.completed ? { borderColor: event.color, backgroundColor: event.color } : {}} disabled={busy} aria-busy={busy} onClick={() => onHabitAction(event, event.completed ? 'undo' : 'increment')} aria-label={event.completed ? 'Снять отметку' : 'Отметить выполнение'}>{busy ? '…' : event.completed ? '✓' : ''}</button>}
+          </div>
+        }
+        if (event.kind === 'task') {
+          const task = taskById.get(event.id)
+          return <div className="calendar-event" key={`task-${event.id}`}><span className="event-kind">✓</span><span><strong>{event.title}</strong><small>Задача · {taskStatusText[event.status]} · {priorities[event.priority].toLowerCase()} приоритет</small></span>{task && <button type="button" className={`check-button task-check ${event.status === 'completed' ? 'checked' : ''}`} onClick={() => onToggleTask(task)} aria-label="Изменить статус задачи">{event.status === 'completed' ? '✓' : ''}</button>}</div>
+        }
+        return <div className="calendar-event" key={`reminder-${event.id}`}><span className="event-kind">⏰</span><span><strong>{event.title}</strong><small>Напоминание · {event.time}{event.description ? ` · ${event.description}` : ''}</small></span></div>
+      })}</div> : <EmptyState title="На эту дату событий нет" text="Привычки и задачи появятся здесь." />}
+    </section>
+    {intervalHabits.length > 0 && <section className="card list-card"><div className="section-head"><div><h2>Привычки с интервалом</h2><p>Когда выполнять в следующий раз</p></div></div><div className="rows">{intervalHabits.map((habit) => { const next = nextFor(habit); return <button type="button" className="calendar-event interval-next" key={habit.id} onClick={() => openDate(next)}><span className="event-kind" style={{ color: habit.color, backgroundColor: `${habit.color}22` }}>↻</span><span><strong>{habit.name}</strong><small>{scheduleLabel(habit.schedule)}</small></span><b className="next-date">{capitalize(relativeDay(next, today))}</b></button> })}</div></section>}
+  </>
 }
 
 function ProductivityChart({ analytics }: { analytics: HabitAnalytics[] }) { const rows = Array.from({ length: 7 }, (_, i) => { const date = addDays(todayAt(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'), i - 6); const scheduled = analytics.flatMap((habit) => habit.progress).filter((item) => item.date === date); return { date, value: scheduled.length ? Math.round(scheduled.filter((item) => item.completed).length / scheduled.length * 100) : 0 } }); const points = rows.map((row, index) => `${40 + index * 145},${180 - row.value * 1.35}`).join(' '); const average = rows.length ? Math.round(rows.reduce((sum, row) => sum + row.value, 0) / rows.length) : 0; return <section className="card chart-card"><div className="section-head"><div><h2>Продуктивность</h2><p>Динамика за последние семь дней</p></div><strong className="chart-average">{average}% <small>в среднем</small></strong></div><div className="chart-wrap"><svg viewBox="0 0 920 230" preserveAspectRatio="none" role="img" aria-label="График продуктивности за семь дней"><defs><linearGradient id="chartFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#9bbbd5" stopOpacity=".28" /><stop offset="1" stopColor="#9bbbd5" stopOpacity=".04" /></linearGradient></defs>{[30, 90, 150, 210].map((y) => <line key={y} x1="30" x2="890" y1={y} y2={y} className="chart-gridline" />)}<polygon points={`40,210 ${points} 910,210`} fill="url(#chartFill)" /><polyline points={points} className="chart-line" />{rows.map((row, i) => <circle key={row.date} cx={40 + i * 145} cy={180 - row.value * 1.35} r="5" className="chart-point" />)}</svg><div className="chart-labels">{rows.map((row) => <span key={row.date}>{dateLabel(row.date, { weekday: 'short' }).replace('.', '')}</span>)}</div></div></section> }
 function AnalyticsPage({ habits, tasks, completedTasks }: { habits: HabitAnalytics[]; tasks: TaskAnalytics | null; completedTasks: number }) { return <><PageHeading eyebrow="ВАШ ПРОГРЕСС" title="Аналитика" subtitle="Смотрите, как последовательность превращается в результат." /><ProductivityChart analytics={habits} /><div className="analytics-grid"><section className="card analytics-card"><span className="section-label">ЗАДАЧИ</span><strong className="big-number">{tasks?.completionRate ?? 0}%</strong><p>Доля выполненных задач за последние 7 дней</p><div className="metric-pair"><span><small>Выполнено</small><b>{tasks?.completedTasks ?? 0}</b></span><span><small>В работе</small><b>{tasks?.pendingTasks ?? 0}</b></span><span><small>Просрочено</small><b>{tasks?.overdueTasks ?? 0}</b></span></div></section><section className="card analytics-card"><span className="section-label">ПРИВЫЧКИ</span><h2>Ваши ритуалы</h2>{habits.length ? habits.map((habit) => <div className="analytics-habit" key={habit.habitId}><div><strong>{habit.name}</strong><small>{habit.completedDays} из {habit.scheduledDays} дней</small></div><b>{habit.completionRate}%</b><div className="mini-progress"><i style={{ width: `${habit.completionRate}%` }} /></div></div>) : <p>Данные появятся после выполнения привычек.</p>}</section><section className="card analytics-card"><span className="section-label">ВСЁ ВРЕМЯ</span><h2>Ваш путь</h2><div className="metric-pair"><span><small>Выполнено задач</small><b>{completedTasks}</b></span><span><small>Активных привычек</small><b>{habits.length}</b></span></div></section></div></> }
 
-function ProfilePage({ profile, onSave, onLogout }: { profile: UserProfile; onSave: (fields: { displayName?: string; timezone?: string }) => Promise<void>; onLogout: () => void }) { const [name, setName] = useState(profile.displayName); const [timezone, setTimezone] = useState(profile.timezone); const zones = ['Asia/Qyzylorda', 'Asia/Almaty', 'Europe/Moscow', 'Europe/London', 'America/New_York', 'UTC']; return <><PageHeading eyebrow="ВАШ АККАУНТ" title="Профиль и настройки" subtitle="Настройте Dayflow под свой ритм." /><section className="card profile-card"><div className="profile-avatar">{profile.displayName.slice(0, 1).toUpperCase()}</div><div><h2>{profile.displayName}</h2><p>{profile.email}</p></div></section><form className="card settings-form" onSubmit={(event) => { event.preventDefault(); void onSave({ displayName: name, timezone }) }}><span className="section-label">ЛИЧНАЯ ИНФОРМАЦИЯ</span><label>Имя<input required maxLength={120} value={name} onChange={(e) => setName(e.target.value)} /></label><label>Email<input disabled value={profile.email} /></label><label>Часовой пояс<select value={timezone} onChange={(e) => setTimezone(e.target.value)}>{[...new Set([...zones, timezone])].map((zone) => <option key={zone}>{zone}</option>)}</select><small>Используется для дат задач и отметок привычек.</small></label><button className="button primary">Сохранить изменения</button></form><section className="card settings-form"><span className="section-label">АККАУНТ</span><p className="muted">Выйдите из аккаунта на этом устройстве.</p><button className="button secondary" onClick={onLogout}>Выйти из аккаунта</button></section></> }
+function ProfilePage({ profile, emailVerified, onSave, onLogout, onResendVerification, onCheckVerification }: { profile: UserProfile; emailVerified: boolean; onSave: (fields: { displayName?: string; timezone?: string }) => Promise<void>; onLogout: () => void; onResendVerification: () => void; onCheckVerification: () => void }) { const [name, setName] = useState(profile.displayName); const [timezone, setTimezone] = useState(profile.timezone); const zones = ['Asia/Qyzylorda', 'Asia/Almaty', 'Europe/Moscow', 'Europe/London', 'America/New_York', 'UTC']; return <><PageHeading eyebrow="ВАШ АККАУНТ" title="Профиль и настройки" subtitle="Настройте Dayflow под свой ритм." /><section className="card profile-card"><div className="profile-avatar">{profile.displayName.slice(0, 1).toUpperCase()}</div><div><h2>{profile.displayName}</h2><p>{profile.email}</p></div></section><section className={`card verify-card ${emailVerified ? 'ok' : ''}`}><div><strong>{emailVerified ? '✓ Email подтверждён' : 'Email не подтверждён'}</strong><p className="muted">{emailVerified ? 'Через почту вы сможете восстановить доступ к аккаунту.' : `Перейдите по ссылке из письма, отправленного на ${profile.email}, чтобы подтвердить адрес.`}</p></div>{!emailVerified && <div className="verify-actions"><button className="button secondary" type="button" onClick={onCheckVerification}>Я подтвердил</button><button className="button secondary" type="button" onClick={onResendVerification}>Отправить письмо снова</button></div>}</section><form className="card settings-form" onSubmit={(event) => { event.preventDefault(); void onSave({ displayName: name, timezone }) }}><span className="section-label">ЛИЧНАЯ ИНФОРМАЦИЯ</span><label>Имя<input required maxLength={120} value={name} onChange={(e) => setName(e.target.value)} /></label><label>Email<input disabled value={profile.email} /></label><label>Часовой пояс<select value={timezone} onChange={(e) => setTimezone(e.target.value)}>{[...new Set([...zones, timezone])].map((zone) => <option key={zone}>{zone}</option>)}</select><small>Используется для дат задач и отметок привычек.</small></label><button className="button primary">Сохранить изменения</button></form><section className="card settings-form"><span className="section-label">АККАУНТ</span><p className="muted">Выйдите из аккаунта на этом устройстве.</p><button className="button secondary" onClick={onLogout}>Выйти из аккаунта</button></section></> }
 
 function hexToRgb(hex: string) { const value = hex.replace('#', ''); return { r: Number.parseInt(value.slice(0, 2), 16), g: Number.parseInt(value.slice(2, 4), 16), b: Number.parseInt(value.slice(4, 6), 16) } }
 function rgbToHex(r: number, g: number, b: number) { return `#${[r, g, b].map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('')}`.toUpperCase() }
@@ -422,29 +630,36 @@ function HabitColorPicker({ color, onChange }: { color: string; onChange: (color
   </div>
 }
 
-function ItemModal({ kind, habit, task, onClose, onSave }: { kind: 'habit' | 'task'; habit: Habit | null; task: Task | null; onClose: () => void; onSave: (data: HabitInput | Parameters<typeof createTask>[0]) => Promise<void> }) {
+function ItemModal({ kind, habit, task, today, onClose, onSave }: { kind: 'habit' | 'task'; habit: Habit | null; task: Task | null; today: LocalDate; onClose: () => void; onSave: (data: HabitInput | Parameters<typeof createTask>[0]) => Promise<void> }) {
   const [name, setName] = useState(kind === 'habit' ? habit?.name ?? '' : task?.title ?? '')
   const [description, setDescription] = useState(kind === 'habit' ? habit?.description ?? '' : task?.description ?? '')
   const [count, setCount] = useState(kind === 'habit' ? habit?.targetPerDay ?? 1 : 1)
   const currentInterval = habit?.schedule.type === 'interval' ? habit.schedule.everyNDays : null
   const [intervalEnabled, setIntervalEnabled] = useState(currentInterval !== null)
   const [intervalDays, setIntervalDays] = useState(currentInterval ?? 2)
+  const tomorrow = addDays(today, 1)
+  // Edits apply from tomorrow, so a new cycle can start tomorrow at the earliest. For an existing interval the
+  // default is its next due date, which keeps the current rhythm unchanged unless the user picks another date.
+  const minIntervalStart = habit ? tomorrow : today
+  const maxIntervalStart = addDays(today, 365)
+  const [intervalStart, setIntervalStart] = useState<LocalDate>(() => habit?.schedule.type === 'interval' ? nextScheduledDate(habit.schedule, tomorrow) : minIntervalStart)
   const [color, setColor] = useState(() => habit?.color ?? randomHabitColor())
   const [type, setType] = useState<'boolean' | 'count'>(habit?.type ?? 'boolean')
   const [priority, setPriority] = useState<Task['priority']>(task?.priority ?? 'medium')
-  const [dueDate, setDueDate] = useState<LocalDate | ''>(task?.dueDate ?? todayAt(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'))
+  const [dueDate, setDueDate] = useState<LocalDate | ''>(task?.dueDate ?? today)
   const [busy, setBusy] = useState(false)
   const isHabit = kind === 'habit'
-  const intervalUnit = intervalDays % 10 === 1 && intervalDays % 100 !== 11 ? 'день' : intervalDays % 10 >= 2 && intervalDays % 10 <= 4 && (intervalDays % 100 < 12 || intervalDays % 100 > 14) ? 'дня' : 'дней'
-  const intervalDescription = intervalDays === 1 ? 'ежедневно' : intervalDays === 2 ? 'через день' : intervalDays === 7 ? 'раз в неделю' : intervalDays === 14 ? 'раз в две недели' : intervalDays === 30 ? 'примерно раз в месяц' : intervalDays === 90 ? 'примерно раз в квартал' : `каждые ${intervalDays} ${intervalDays % 10 === 1 && intervalDays % 100 !== 11 ? 'день' : intervalDays % 10 >= 2 && intervalDays % 10 <= 4 && (intervalDays % 100 < 12 || intervalDays % 100 > 14) ? 'дня' : 'дней'}`
+  const intervalValid = Number.isInteger(intervalDays) && intervalDays >= 1 && intervalDays <= 365
+  const startValid = isLocalDate(intervalStart) && intervalStart >= minIntervalStart && intervalStart <= maxIntervalStart
+  const preview = intervalEnabled && intervalValid && startValid ? upcomingDates({ type: 'interval', everyNDays: intervalDays, startDate: intervalStart }, minIntervalStart, 4) : []
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    if (isHabit && intervalEnabled && (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 365)) return
+    if (isHabit && intervalEnabled && (!intervalValid || !startValid)) return
     setBusy(true)
     try {
       if (isHabit) {
         const schedule: HabitSchedule = intervalEnabled
-          ? { type: 'interval', everyNDays: intervalDays, startDate: habit?.schedule.type === 'interval' ? habit.schedule.startDate : todayAt(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC') }
+          ? { type: 'interval', everyNDays: intervalDays, startDate: intervalStart }
           : habit && habit.schedule.type !== 'interval' ? habit.schedule : { type: 'daily' }
         await onSave({ name, description, type, targetPerDay: type === 'boolean' ? 1 : count, schedule, color })
       } else await onSave({ title: name, description, priority, dueDate: dueDate || null })
@@ -458,7 +673,7 @@ function ItemModal({ kind, habit, task, onClose, onSave }: { kind: 'habit' | 'ta
       <HabitColorPicker color={color} onChange={setColor} />
       {type === 'count' && <label>Цель на день<input required type="number" min={1} max={1000000} value={count} onChange={(e) => setCount(Number(e.target.value))} /></label>}
       <label className="interval-toggle"><input type="checkbox" checked={intervalEnabled} onChange={(e) => setIntervalEnabled(e.target.checked)} />Задать интервал выполнения</label>
-      {intervalEnabled && <div className="interval-control"><span>Выполнять каждые</span><input aria-label="Интервал в днях" required type="number" min={1} max={365} step={1} value={intervalDays} onChange={(e) => setIntervalDays(e.target.value === '' ? 0 : Number(e.target.value))} /><span>{intervalUnit}</span><small>{intervalDays >= 1 && intervalDays <= 365 ? intervalDescription : 'Введите число от 1 до 365'}</small></div>}
+      {intervalEnabled && <div className="interval-control"><span>Выполнять каждые</span><input aria-label="Интервал в днях" required type="number" min={1} max={365} step={1} value={intervalDays} onChange={(e) => setIntervalDays(e.target.value === '' ? 0 : Number(e.target.value))} /><span>{dayWord(intervalDays)}</span><small>{intervalValid ? capitalize(intervalText(intervalDays)) : 'Введите число от 1 до 365'}</small><label className="interval-start">{habit ? 'Новый цикл начинается' : 'Первое выполнение'}<input type="date" required min={minIntervalStart} max={maxIntervalStart} value={intervalStart} onChange={(e) => setIntervalStart(e.target.value as LocalDate)} /></label>{!startValid ? <small className="field-error">Выберите дату с {shortDate(minIntervalStart)} по {shortDate(maxIntervalStart)}.</small> : preview.length > 0 && <small className="interval-preview">Ближайшие даты: {preview.map((day) => relativeDay(day, today)).join(', ')}</small>}{habit && <small className="interval-hint">Изменения действуют с завтрашнего дня — прошлые отметки и серии сохраняются.</small>}</div>}
       </> : <><label>Срок выполнения<input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value as LocalDate | '')} /></label><label>Приоритет<select value={priority} onChange={(e) => setPriority(e.target.value as Task['priority'])}><option value="high">Высокий</option><option value="medium">Средний</option><option value="low">Низкий</option></select></label></>}
     <div className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>Отмена</button><button className="button primary" disabled={busy}>{busy ? 'Сохранение…' : 'Сохранить'}</button></div>
   </form></div>
