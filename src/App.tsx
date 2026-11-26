@@ -74,15 +74,23 @@ const quotes = [
 function Icon({ children }: { children: ReactNode }) { return <span className="icon" aria-hidden="true">{children}</span> }
 
 const THEME_STORAGE_KEY = 'dayflow-theme'
+const SIDEBAR_STORAGE_KEY = 'dayflow-sidebar-collapsed'
 function readColorTheme(): ColorTheme {
   try { return window.localStorage.getItem(THEME_STORAGE_KEY) === 'classic' ? 'classic' : 'modern-fresh' }
   catch { return 'modern-fresh' }
+}
+function readSidebarCollapsed(): boolean {
+  try { return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true' }
+  catch { return false }
 }
 
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [theme, setTheme] = useState<ColorTheme>(readColorTheme)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [isNarrow, setIsNarrow] = useState(() => window.matchMedia('(max-width: 760px)').matches)
   const [page, setPage] = useState<Page>(() => { const requested = new URLSearchParams(window.location.search).get('page') as Page | null; return requested && pages.includes(requested) ? requested : 'dashboard' })
   const [reminders, setReminders] = useState<Reminder[]>([])
   const [reminderModal, setReminderModal] = useState<{ reminder: Reminder | null; link?: ReminderLink } | null>(null)
@@ -102,8 +110,9 @@ function App() {
   const [modal, setModal] = useState<'habit' | 'task' | null>(null)
   const [editingHabit, setEditingHabit] = useState<Habit | null>(null)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
-  const [search, setSearch] = useState('')
   const [calendarDate, setCalendarDate] = useState<LocalDate>(() => todayAt(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'))
+  const sidebarRef = useRef<HTMLElement>(null)
+  const menuTriggerRef = useRef<HTMLButtonElement>(null)
   const calendarDateRef = useRef(calendarDate)
   const currentUid = useRef<string | null>(null)
   const refreshVersion = useRef(0)
@@ -119,6 +128,53 @@ function App() {
     document.documentElement.dataset.theme = theme
     try { window.localStorage.setItem(THEME_STORAGE_KEY, theme) } catch { /* Theme remains active for this session. */ }
   }, [theme])
+
+  useEffect(() => {
+    try { window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed)) } catch { /* Keep the sidebar state for this session. */ }
+  }, [sidebarCollapsed])
+
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 760px)')
+    const update = () => { setIsNarrow(query.matches); if (!query.matches) setMobileMenuOpen(false) }
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+
+  useEffect(() => {
+    if (!mobileMenuOpen || !isNarrow) return
+    const sidebar = sidebarRef.current
+    const trigger = menuTriggerRef.current
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const focusableSelector = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    const focusable = () => sidebar?.querySelectorAll<HTMLElement>(focusableSelector) ?? []
+    const focusFrame = window.requestAnimationFrame(() => (focusable()[0] ?? sidebar)?.focus())
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setMobileMenuOpen(false)
+        menuTriggerRef.current?.focus()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const items = [...focusable()]
+      if (!items.length) { event.preventDefault(); sidebar?.focus(); return }
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (event.shiftKey && (document.activeElement === first || !sidebar?.contains(document.activeElement))) {
+        event.preventDefault(); last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || !sidebar?.contains(document.activeElement))) {
+        event.preventDefault(); first.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      document.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
+      if (sidebar?.contains(document.activeElement)) trigger?.focus()
+    }
+  }, [mobileMenuOpen, isNarrow])
 
   const refresh = useCallback(async (activeUser: User, showSpinner = true, savedMessage?: string) => {
     const version = ++refreshVersion.current
@@ -276,9 +332,7 @@ function App() {
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(null), 4500); return () => window.clearTimeout(timer) }, [notice])
 
   const today = profile ? todayAt(profile.timezone) : todayAt('UTC')
-  const visibleTasks = useMemo(() => tasks.filter((task) => `${task.title} ${task.description}`.toLowerCase().includes(search.toLowerCase())), [tasks, search])
-  const visibleHabits = useMemo(() => habits.filter((habit) => `${habit.name} ${habit.description}`.toLowerCase().includes(search.toLowerCase())), [habits, search])
-  const todaysHabits = useMemo(() => visibleHabits.filter((habit) => habitAnalytics.some((item) => item.habitId === habit.id && item.progress.some((day) => day.date === today))), [visibleHabits, habitAnalytics, today])
+  const todaysHabits = useMemo(() => habits.filter((habit) => habitAnalytics.some((item) => item.habitId === habit.id && item.progress.some((day) => day.date === today))), [habits, habitAnalytics, today])
   const completedTasks = tasks.filter((task) => task.status === 'completed').length
   const allPlanned = (summary?.scheduledHabits ?? 0) + (summary?.tasksDue ?? 0)
   const allDone = (summary?.completedHabits ?? 0) + (summary?.completedTasksDue ?? 0)
@@ -410,18 +464,25 @@ function App() {
   if (loading) return <div className="boot-screen"><span className="brand-mark">d</span><span className="loader" />Загружаем Dayflow</div>
   if (!user) return <AuthScreen notice={notice} onNotice={setNotice} />
 
-  return <div className="app-shell">
+  const toggleNavigation = () => {
+    if (isNarrow) setMobileMenuOpen((open) => !open)
+    else setSidebarCollapsed((collapsed) => !collapsed)
+  }
+  const closeMobileMenu = () => {
+    setMobileMenuOpen(false)
+    if (isNarrow) window.requestAnimationFrame(() => menuTriggerRef.current?.focus())
+  }
+  const drawerHidden = isNarrow ? !mobileMenuOpen : sidebarCollapsed
+
+  return <div className={`app-shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}${mobileMenuOpen && isNarrow ? ' mobile-menu-open' : ''}`}>
     <header className="topbar">
-      <button className="header-profile" type="button" onClick={() => setPage('profile')} aria-label={`Открыть профиль: ${profile?.displayName ?? 'Профиль'}`}>
-        <span className="header-avatar">{profile?.displayName?.slice(0, 1).toUpperCase() || 'А'}</span>
-        <span className="header-profile-copy"><small>Мой профиль</small><strong>{profile?.displayName || 'Аккаунт'}</strong></span>
-        <span className="header-profile-arrow" aria-hidden="true">↗</span>
-      </button>
-      <label className="search-box"><Icon>⌕</Icon><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Найти задачу или привычку..." /></label>
-      <button className="header-tool theme-tool" aria-label="Переключить цветовую тему" title={theme === 'modern-fresh' ? 'Переключить на классическую тему' : 'Переключить на Modern Fresh'} onClick={() => setTheme(theme === 'modern-fresh' ? 'classic' : 'modern-fresh')}>☼</button>
-      <button className="header-tool notification-tool" aria-label="Открыть напоминания" title="Напоминания" onClick={() => setPage('reminders')}>♧{reminders.some((reminder) => reminder.enabled) && <i />}</button>
-      <button className="primary-icon" aria-label="Добавить задачу" onClick={() => showForm('task')}><span>＋</span></button>
-      <details className="header-menu" onClick={(event) => { if ((event.target as HTMLElement).closest('button')) event.currentTarget.open = false }}>
+      <div className="topbar-brand">
+        <button ref={menuTriggerRef} className="hamburger-button" type="button" onClick={toggleNavigation} aria-label={isNarrow ? (mobileMenuOpen ? 'Закрыть меню' : 'Открыть меню') : (sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню')} aria-expanded={isNarrow ? mobileMenuOpen : !sidebarCollapsed} aria-controls="dayflow-navigation"><span /><span /><span /></button>
+        <button className="mobile-brand" type="button" onClick={() => setPage('dashboard')} aria-label="Dayflow — обзор"><span className="brand-mark">d</span><span>dayflow</span></button>
+      </div>
+      <div className="topbar-actions">
+        <button className="primary-icon" aria-label="Добавить задачу" onClick={() => showForm('task')}><span>＋</span></button>
+        <details className="header-menu" onClick={(event) => { if ((event.target as HTMLElement).closest('button')) event.currentTarget.open = false }}>
         <summary aria-label="Дополнительные действия" title="Дополнительные действия"><span aria-hidden="true">•••</span></summary>
         <div className="header-menu-popover">
           <button type="button" onClick={() => setPage('profile')}>Профиль и настройки</button>
@@ -430,13 +491,15 @@ function App() {
           <span className="header-menu-divider" />
           <button className="header-menu-logout" type="button" onClick={() => void signOut()}>Выйти из аккаунта</button>
         </div>
-      </details>
+        </details>
+      </div>
     </header>
-    <aside className="sidebar">
-      <button className="brand" onClick={() => setPage('dashboard')}><span className="brand-mark">d</span><span>dayflow</span></button>
-      <button className="sidebar-profile" onClick={() => setPage('profile')} aria-label={`Открыть профиль ${profile?.displayName || ''}`}><span className="sidebar-avatar">{profile?.displayName?.slice(0, 1).toUpperCase() || 'А'}</span><span><small>Мой профиль</small><strong>{profile?.displayName || 'Аккаунт'}</strong></span><b>⌄</b></button>
+    {mobileMenuOpen && isNarrow && <button className="nav-backdrop" type="button" aria-label="Закрыть меню" tabIndex={-1} onClick={closeMobileMenu} />}
+    <aside ref={sidebarRef} id="dayflow-navigation" className="sidebar" aria-label="Основная навигация" aria-hidden={drawerHidden} aria-modal={isNarrow && mobileMenuOpen ? true : undefined} role={isNarrow && mobileMenuOpen ? 'dialog' : undefined} inert={drawerHidden}>
+      <button className="sidebar-close" type="button" aria-label="Закрыть меню" onClick={closeMobileMenu}>×</button>
+      <button className="sidebar-profile" onClick={() => { setPage('profile'); closeMobileMenu() }} aria-label={`Открыть профиль ${profile?.displayName || ''}`}><span className="sidebar-avatar">{profile?.displayName?.slice(0, 1).toUpperCase() || 'А'}</span><span><small>Мой профиль</small><strong>{profile?.displayName || 'Аккаунт'}</strong></span><b>⌄</b></button>
       <div className="side-caption">МЕНЮ</div>
-      <nav>{navItems.map((item) => <button key={item.id} className={`nav-link ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><Icon>{item.icon}</Icon>{item.label}</button>)}</nav>
+      <nav>{navItems.map((item) => <button key={item.id} className={`nav-link ${page === item.id ? 'active' : ''}`} aria-current={page === item.id ? 'page' : undefined} onClick={() => { setPage(item.id); closeMobileMenu() }}><Icon>{item.icon}</Icon>{item.label}</button>)}</nav>
       <div className="sidebar-bottom"><div className="sidebar-note"><span>✦</span><strong>Маленькие шаги<br />ведут к большим целям</strong><small>Продолжайте в своём ритме</small></div><button className="nav-link" onClick={() => void signOut()}><Icon>↪</Icon>Выйти</button></div>
     </aside>
     <main className="main-area">
@@ -444,8 +507,8 @@ function App() {
         {notice && <div className={`toast ${notice.kind}`} role="status">{notice.text}<button onClick={() => setNotice(null)} aria-label="Закрыть">×</button></div>}
         {refreshing && <div className="sync-indicator"><span className="loader small" />Синхронизация данных</div>}
         {page === 'dashboard' && <Dashboard profile={profile} today={today} summary={summary} progress={progress} completedTasks={completedTasks} streaks={streaks} analytics={habitAnalytics} reminders={reminders} habits={todaysHabits} tasks={tasks} completionOverrides={habitCompletionOverrides} pendingHabitIds={pendingHabitIds} onToggleHabit={toggleHabit} onToggleTask={toggleTask} onCreate={showForm} onEditHabit={(item) => showForm('habit', item)} onEditTask={(item) => showForm('task', item)} onNavigate={setPage} />}
-        {page === 'habits' && <HabitsPage habits={visibleHabits} today={today} streaks={streaks} completionOverrides={habitCompletionOverrides} pendingHabitIds={pendingHabitIds} onAdd={() => showForm('habit')} onToggle={toggleHabit} onEdit={(item) => showForm('habit', item)} onArchive={async (item) => { if (!window.confirm(`Архивировать привычку «${item.name}»?`)) return; try { await archiveHabit(item.id); await afterMutation('Привычка архивирована') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onDelete={async (item) => { if (!window.confirm(`Удалить привычку «${item.name}» вместе с историей?`)) return; try { await deleteHabit(item.id); await afterMutation('Привычка удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
-        {page === 'tasks' && <TasksPage tasks={visibleTasks} onAdd={() => showForm('task')} onToggle={toggleTask} onEdit={(item) => showForm('task', item)} onDelete={async (item) => { if (!window.confirm(`Удалить задачу «${item.title}»?`)) return; try { await deleteTask(item.id); await afterMutation('Задача удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
+        {page === 'habits' && <HabitsPage habits={habits} today={today} streaks={streaks} completionOverrides={habitCompletionOverrides} pendingHabitIds={pendingHabitIds} onAdd={() => showForm('habit')} onToggle={toggleHabit} onEdit={(item) => showForm('habit', item)} onArchive={async (item) => { if (!window.confirm(`Архивировать привычку «${item.name}»?`)) return; try { await archiveHabit(item.id); await afterMutation('Привычка архивирована') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onDelete={async (item) => { if (!window.confirm(`Удалить привычку «${item.name}» вместе с историей?`)) return; try { await deleteHabit(item.id); await afterMutation('Привычка удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
+        {page === 'tasks' && <TasksPage tasks={tasks} onAdd={() => showForm('task')} onToggle={toggleTask} onEdit={(item) => showForm('task', item)} onDelete={async (item) => { if (!window.confirm(`Удалить задачу «${item.title}»?`)) return; try { await deleteTask(item.id); await afterMutation('Задача удалена') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} />}
         {page === 'calendar' && <CalendarPage date={calendarDate} today={today} days={calendar} habits={habits} tasks={tasks} loading={calendarLoading} pending={calendarPending} onChange={changeCalendarMonth} onHabitAction={(event, operation) => void changeHabitOnDate(event, operation)} onToggleTask={(task) => void toggleTask(task)} />}
         {page === 'reminders' && <RemindersPage reminders={reminders} habits={habits} tasks={tasks} today={today} status={notificationStatus}
           onAdd={(link) => setReminderModal({ reminder: null, link })}
@@ -459,7 +522,6 @@ function App() {
         {page === 'analytics' && <AnalyticsPage habits={habitAnalytics} tasks={taskAnalytics} completedTasks={completedTasks} />}
         {page === 'profile' && profile && <ProfilePage profile={profile} emailVerified={emailVerified} theme={theme} onThemeChange={setTheme} onResendVerification={async () => { try { await resendEmailVerification(); setNotice({ kind: 'success', text: `Письмо для подтверждения отправлено на ${profile.email}.` }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onCheckVerification={async () => { try { const verified = await reloadEmailVerificationStatus(); setEmailVerified(verified); setNotice(verified ? { kind: 'success', text: 'Email подтверждён. Спасибо!' } : { kind: 'error', text: 'Подтверждение пока не получено. Проверьте почту и папку «Спам».' }) } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onSave={async (fields) => { try { const next = await updateUserProfileFields(fields); setProfile(next); await afterMutation('Профиль обновлён') } catch (error) { setNotice({ kind: 'error', text: errorText(error) }) } }} onLogout={() => void signOut()} />}
       </div>
-      <nav className="mobile-nav" aria-label="Основная навигация">{navItems.map((item) => <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}><Icon>{item.icon}</Icon><span>{item.id === 'profile' ? 'Профиль' : item.label}</span></button>)}</nav>
     </main>
     {reminderModal && <ReminderModal reminder={reminderModal.reminder} initialLink={reminderModal.link} habits={habits} tasks={tasks} today={today} onClose={() => setReminderModal(null)} onSave={saveReminder} />}
     {modal && <ItemModal kind={modal} habit={editingHabit} task={editingTask} today={today} onClose={() => setModal(null)} onSave={async (data) => {
